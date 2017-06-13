@@ -15,43 +15,21 @@ use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::sync::Arc;
 
-#[derive(Debug)]
-pub struct WebPkiError {
-    pub inner: webpki::Error,
-}
-
-impl std::error::Error for WebPkiError {
-    fn description(&self) -> &str {
-        "WebPkiError"
-    }
-}
-
-impl std::fmt::Display for WebPkiError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "WebPkiError: {:?}", self.inner)
-    }
-}
-
-impl From<webpki::Error> for WebPkiError {
-    fn from(inner: webpki::Error) -> WebPkiError {
-        WebPkiError {
-            inner: inner,
-        }
-    }
-}
-
 error_chain! {
     foreign_links {
         Io(io::Error);
         ProtoBuf(protobuf::ProtobufError);
         Tls(rustls::TLSError);
-        WebPki(WebPkiError);
     }
 
     errors {
         DeviceIdMismatch {
             description("Device ID mismatch")
             display("Device ID mismatch")
+        }
+        WebPki(inner: webpki::Error) {
+            description("WebPKI error")
+            display("WebPKI Error: {:?}", inner)
         }
     }
 }
@@ -141,7 +119,7 @@ fn connect(host_and_port: &str, cn: &str, device_id: &str) -> Result<rustls::Cli
     }
 
     let mut config = rustls::ClientConfig::new();
-    config.root_store.add(&cert).map_err(|e| WebPkiError {inner: e})?;
+    config.root_store.add(&cert).map_err(ErrorKind::WebPki)?;
 
     let mut client = rustls::ClientSession::new(&Arc::new(config), cn);
 
@@ -167,7 +145,7 @@ fn connect(host_and_port: &str, cn: &str, device_id: &str) -> Result<rustls::Cli
                 }
             }
             if let Err(e) = client.process_new_packets() {
-                println!("got an error processing TLS packets: {:?}", e);
+                println!("got an error processing TLS packets: {}", e);
                 println!("peer certs: {:?}", client.get_peer_certificates());
                 return Err(e.into());
             }
