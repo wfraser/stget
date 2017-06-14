@@ -71,7 +71,6 @@ fn write_hello(client: &mut rustls::ClientSession) -> Result<()> {
     use protobuf::{CodedOutputStream, Message};
     let mut output = CodedOutputStream::new(client);
 
-    /*
     output.write_uint32_no_tag(stget::HELLO_MAGIC)?;
 
     let mut hello = stget::syncthing_proto::Hello::new();
@@ -85,16 +84,31 @@ fn write_hello(client: &mut rustls::ClientSession) -> Result<()> {
         (hello.get_cached_size() & 0xFF) as u8])?;
 
     hello.write_to_with_cached_sizes(&mut output)?;
-    */
 
-    output.write_raw_bytes(b"GET / HTTP/1.0\r\n\
-                             Host: www.codewise.org\r\n\
-                             Connection: close\r\n\
-                             Accept-Encoding: identity\r\n\
-                             \r\n")?;
     output.flush()?;
 
     Ok(())
+}
+
+struct CertVerifier {
+    cert: rustls::Certificate,
+}
+
+impl rustls::ServerCertVerifier for CertVerifier {
+    fn verify_server_cert(
+        &self,
+        _roots: &rustls::RootCertStore,
+        presented_certs: &[rustls::Certificate],
+        _dns_name: &str)
+        -> std::result::Result<(), rustls::TLSError>
+    {
+        for cert in presented_certs {
+            if cert == &self.cert {
+                return Ok(())
+            }
+        }
+        Err(rustls::TLSError::General("server cert doesn't match!".to_owned()))
+    }
 }
 
 /// `host_and_port`: string with the hostname or IP address, a colon, and the port to connect to.
@@ -119,64 +133,99 @@ fn connect(host_and_port: &str, cn: &str, device_id: &str) -> Result<rustls::Cli
     }
 
     let mut config = rustls::ClientConfig::new();
-    config.root_store.add(&cert).map_err(ErrorKind::WebPki)?;
+
+    rustls::DangerousClientConfig { cfg: &mut config }.set_certificate_verifier(
+        Box::new(CertVerifier { cert: cert }));
 
     let mut client = rustls::ClientSession::new(&Arc::new(config), cn);
 
-    write_hello(&mut client)?;
+    //write_hello(&mut client)?;
+    client.write(b"GET / HTTP/1.0\r\n\
+                   Host: www.codewise.org\r\n\
+                   Connection: close\r\n\
+                   Accept-Encoding: identity\r\n\
+                   \r\n")?;
 
+    let mut stream = TcpStream::connect(host_and_port)?;
+    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+
+    // This is basically client.complete_io() with extra logging.
     loop {
-        let mut stream = TcpStream::connect(host_and_port)?;
-        stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+        let handshaking = client.is_handshaking();
+        let mut wrlen = 0;
+        let mut rdlen = 0;
 
-        if client.wants_write() {
-            println!("writing");
-            client.write_tls(&mut stream)?;
-        }
-        if client.wants_read() {
+        loop {
+            while client.wants_write() {
+                println!("writing");
+                match client.write_tls(&mut stream) {
+                    Ok(nwritten) => {
+                        println!("wrote {} bytes of TLS data", nwritten);
+                        wrlen += nwritten;
+                    },
+                    Err(e) => {
+                        println!("write error: {}", e);
+                        return Err(e.into());
+                    }
+                }
+            }
+
+            if !handshaking && wrlen > 0 {
+                println!("write completed");
+                break;
+            }
+
             println!("reading");
             match client.read_tls(&mut stream) {
                 Ok(nread) => {
                     println!("read {} bytes of TLS data", nread);
+                    rdlen += nread;
                 },
                 Err(e) => {
-                    println!("TLS read error: {}", e);
+                    println!("read error: {}", e);
                     return Err(e.into());
                 }
             }
+
             if let Err(e) = client.process_new_packets() {
                 println!("got an error processing TLS packets: {}", e);
-                println!("peer certs: {:?}", client.get_peer_certificates());
                 return Err(e.into());
             }
-            let mut plaintext = Vec::new();
-            match client.read_to_end(&mut plaintext) {
-                Ok(nread) => {
-                    if nread != 0 {
-                        println!("read plaintext: {}", String::from_utf8_lossy(&plaintext));
-                    } else {
-                        println!("read no plaintext");
-                    }
+
+            match (handshaking, client.is_handshaking()) {
+                (true, false) => {
+                    println!("done handshaking");
+                    break;
                 },
-                Err(e) => {
-                    println!("plaintext read error: {}", e);
-                    return Err(e.into());
+                (false, _) => {
+                    println!("read completed");
+                    break;
+                },
+                (_, _) => {
+                    println!("looping again");
                 }
             }
         }
 
-        if !client.is_handshaking() {
-            println!("done handshaking");
-            return Ok(client);
+        println!("rl = {}, wl = {}", rdlen, wrlen);
+        if rdlen == 0 && wrlen == 0 {
+            println!("EOF");
+            break;
         }
+        let mut plaintext = vec![];
+        client.read_to_end(&mut plaintext).unwrap();
+        println!("got plaintext of {} bytes", plaintext.len());
+        println!("got plaintext: {}", String::from_utf8_lossy(&plaintext));
     }
+
+    Ok(client)
 }
 
 fn main() {
     env_logger::init().unwrap();
 
-    //connect("10.0.0.1:22000", "syncthing", "JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH").unwrap();
-    connect("www.codewise.org:443", "www.codewise.org", "O3PT6VP-QEQ4YBZ-OTMICG5-MX2G4KX-HK7ZTWP-OMANANC-WXR4TCI-PA3QWAA").unwrap();
+    //connect("127.0.0.1:22000", "syncthing", "JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH").unwrap();
+    connect("odin.codewise.org:443", "odin.codewise.org", "F7PLLUS-HP3DMOU-K7XCC3I-3AGZLZQ-6R4XT5D-FS7NZ7J-4Q3OZNJ-OJ2SSA7").unwrap();
 
     println!("Hello, World!");
 }
