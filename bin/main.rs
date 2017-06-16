@@ -9,7 +9,6 @@ extern crate protobuf;
 extern crate ring;
 extern crate rustls;
 extern crate stget;
-extern crate webpki;
 
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
@@ -23,47 +22,6 @@ error_chain! {
     }
 
     errors {
-        DeviceIdMismatch {
-            description("Device ID mismatch")
-            display("Device ID mismatch")
-        }
-        WebPki(inner: webpki::Error) {
-            description("WebPKI error")
-            display("WebPKI Error: {:?}", inner)
-        }
-    }
-}
-
-fn get_certificate(host_and_port: &str, cn: &str) -> Result<rustls::Certificate> {
-    use rustls::{Session, TLSError};
-
-    let config = Arc::new(rustls::ClientConfig::new());
-    let mut stream = TcpStream::connect(host_and_port)?;
-    let mut client = rustls::ClientSession::new(&config, cn);
-    loop {
-        if client.wants_write() {
-            debug!("TLS writing");
-            client.write_tls(&mut stream)?;
-        }
-
-        if client.wants_read() {
-            debug!("TLS reading");
-            client.read_tls(&mut stream)?;
-            let result = client.process_new_packets();
-            if let Err(TLSError::WebPKIError(webpki::Error::UnknownIssuer)) = result {
-                println!("got unknown issuer error; grabbing cert and reconnecting");
-                if let Some(certs) = client.get_peer_certificates() {
-                    return Ok(certs[0].clone());
-                }
-            } else if let Err(e) = result {
-                return Err(e.into());
-            }
-        }
-
-        if !client.is_handshaking() {
-            // This shouldn't happen, as the initial config has an empty set of root certs.
-            bail!("finished handshaking without certificate error!");
-        }
     }
 }
 
@@ -90,11 +48,19 @@ fn write_hello(client: &mut rustls::ClientSession) -> Result<()> {
     Ok(())
 }
 
-struct CertVerifier {
-    cert: rustls::Certificate,
+struct SyncthingCertVerifier {
+    device_id: String,
 }
 
-impl rustls::ServerCertVerifier for CertVerifier {
+impl SyncthingCertVerifier {
+    pub fn new<S: AsRef<str>>(device_id: S) -> SyncthingCertVerifier {
+        SyncthingCertVerifier {
+            device_id: device_id.as_ref().to_owned(),
+        }
+    }
+}
+
+impl rustls::ServerCertVerifier for SyncthingCertVerifier {
     fn verify_server_cert(
         &self,
         _roots: &rustls::RootCertStore,
@@ -102,12 +68,25 @@ impl rustls::ServerCertVerifier for CertVerifier {
         _dns_name: &str)
         -> std::result::Result<(), rustls::TLSError>
     {
-        for cert in presented_certs {
-            if cert == &self.cert {
-                return Ok(())
+        use rustls::internal::msgs::codec::Codec;
+        debug!("Checking device ID. Server presented {} certificates", presented_certs.len());
+        for (i, cert) in presented_certs.iter().enumerate() {
+            let cert_bytes = cert.get_encoding();
+            let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
+            hash_ctx.update(&cert_bytes[3..]);
+            let digest = hash_ctx.finish();
+            debug!("{}: cert hash is {:?}", i, digest);
+            let device_id = stget::util::device_id_from_hash(digest.as_ref());
+            debug!("{}: device ID {}", i, device_id);
+            if device_id == self.device_id {
+                debug!("{}: matches", i);
+                return Ok(());
+            } else {
+                warn!("{}: mismatch", i);
             }
         }
-        Err(rustls::TLSError::General("server cert doesn't match!".to_owned()))
+        error!("none of the presented server certificates have the expected Device ID");
+        Err(rustls::TLSError::General("Syncthing device ID mismatch".to_owned()))
     }
 }
 
@@ -116,38 +95,23 @@ impl rustls::ServerCertVerifier for CertVerifier {
 /// `device_id`: the SHA-256 of the certificate the host on the other end must present
 fn connect(host_and_port: &str, cn: &str, device_id: &str) -> Result<rustls::ClientSession>{
     use rustls::Session;
-    use rustls::internal::msgs::codec::Codec;
-
-    let cert = get_certificate(host_and_port, cn)?;
-
-    let cert_bytes = cert.get_encoding();
-    let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    hash_ctx.update(&cert_bytes[3..]);
-    let digest = hash_ctx.finish();
-    println!("remote certificate hash is {:?}", digest);
-    let actual_device_id = stget::util::device_id_from_hash(digest.as_ref());
-    println!("remote has device ID {}", actual_device_id);
-
-    if actual_device_id != device_id {
-        bail!(ErrorKind::DeviceIdMismatch);
-    }
 
     let mut config = rustls::ClientConfig::new();
 
     rustls::DangerousClientConfig { cfg: &mut config }.set_certificate_verifier(
-        Box::new(CertVerifier { cert: cert }));
+        Box::new(SyncthingCertVerifier::new(device_id)));
 
     let mut client = rustls::ClientSession::new(&Arc::new(config), cn);
 
     //write_hello(&mut client)?;
-    client.write(b"GET / HTTP/1.0\r\n\
-                   Host: www.codewise.org\r\n\
-                   Connection: close\r\n\
-                   Accept-Encoding: identity\r\n\
+    client.write(b"GET / HTTP/1.0\r\n
+                   Host: www.codewise.org\r\n
+                   Connection: close\r\n
+                   Accept-Encoding: identity\r\n
                    \r\n")?;
 
     let mut stream = TcpStream::connect(host_and_port)?;
-    stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+    //stream.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
 
     // This is basically client.complete_io() with extra logging.
     loop {
@@ -157,63 +121,63 @@ fn connect(host_and_port: &str, cn: &str, device_id: &str) -> Result<rustls::Cli
 
         loop {
             while client.wants_write() {
-                println!("writing");
+                debug!("writing");
                 match client.write_tls(&mut stream) {
-                    Ok(nwritten) => {
-                        println!("wrote {} bytes of TLS data", nwritten);
-                        wrlen += nwritten;
+                    Ok(n) => {
+                        debug!("wrote {} bytes of TLS data", n);
+                        wrlen += n;
                     },
                     Err(e) => {
-                        println!("write error: {}", e);
+                        error!("write error: {}", e);
                         return Err(e.into());
                     }
                 }
             }
 
             if !handshaking && wrlen > 0 {
-                println!("write completed");
+                debug!("write completed");
                 break;
             }
 
-            println!("reading");
+            debug!("reading");
             match client.read_tls(&mut stream) {
-                Ok(nread) => {
-                    println!("read {} bytes of TLS data", nread);
-                    rdlen += nread;
+                Ok(n) => {
+                    debug!("read {} bytes of TLS data", n);
+                    rdlen += n;
                 },
                 Err(e) => {
-                    println!("read error: {}", e);
+                    error!("read error: {}", e);
                     return Err(e.into());
                 }
             }
 
             if let Err(e) = client.process_new_packets() {
-                println!("got an error processing TLS packets: {}", e);
+                error!("error processing TLS packets: {}", e);
                 return Err(e.into());
             }
 
             match (handshaking, client.is_handshaking()) {
                 (true, false) => {
-                    println!("done handshaking");
+                    debug!("done handshaking");
                     break;
                 },
                 (false, _) => {
-                    println!("read completed");
+                    debug!("read completed");
                     break;
                 },
                 (_, _) => {
-                    println!("looping again");
+                    debug!("looping again");
                 }
             }
         }
 
-        println!("rl = {}, wl = {}", rdlen, wrlen);
+        debug!("rl = {}, wl = {}", rdlen, wrlen);
         if rdlen == 0 && wrlen == 0 {
-            println!("EOF");
+            debug!("EOF");
             break;
         }
         let mut plaintext = vec![];
-        client.read_to_end(&mut plaintext).unwrap();
+        client.read_to_end(&mut plaintext)?;
         println!("got plaintext of {} bytes", plaintext.len());
         println!("got plaintext: {}", String::from_utf8_lossy(&plaintext));
     }

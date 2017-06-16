@@ -14,10 +14,9 @@ env_logger = "0.4"
 error-chain = "0.9"
 log = "0.3"
 protobuf = "1.2"
-webpki = "0.12.1"   # match the version in rustls
-ring = "0.9.7"      # match the version in rustls
+ring = "0.11"
 
 [dependencies.rustls]
-version = "0.8"
+version = "0.9"
 #git = "https://github.com/ctz/rustls"
 features = ["dangerous_configuration"]
