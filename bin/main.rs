@@ -1,13 +1,8 @@
 #![allow(unknown_lints)]
 
-extern crate base32;
-extern crate bufstream;
 extern crate env_logger;
 #[macro_use] extern crate error_chain;
 #[macro_use] extern crate log;
-extern crate protobuf;
-extern crate ring;
-extern crate rustls;
 extern crate stget;
 
 error_chain! {
