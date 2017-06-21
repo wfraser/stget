@@ -1,4 +1,6 @@
+use std::io;
 use base32;
+use libc;
 
 #[allow(many_single_char_names)]
 pub fn device_id_from_hash(hash: &[u8]) -> String {
@@ -49,4 +51,36 @@ fn syncthing_luhn(group: &str) -> char {
     let remainder = sum % n;
     let check_codepoint = (n - remainder) % n;
     ALPHABET[check_codepoint] as char
+}
+
+#[cfg(unix)]
+pub fn get_hostname() -> io::Result<String> {
+    extern "C" {
+        fn gethostname(name: *mut u8, size: libc::size_t) -> libc::c_int;
+    }
+
+    let mut buf = [0u8; 256];
+    let result = unsafe { gethostname(buf.as_mut_ptr(), 255) };
+    if -1 == result {
+        return Err(io::Error::last_os_error());
+    }
+
+    let len = buf.iter().position(|c| *c == 0).unwrap_or(255);
+    Ok(String::from_utf8_lossy(&buf[0 .. len]).into_owned())
+}
+
+#[cfg(windows)]
+pub fn get_hostname() -> io::Result<String> {
+    extern "C" {
+        fn GetComputerNameW(lpBuffer: *mut u16, lpnSize: *mut u32) -> i32;
+    }
+
+    let mut buf = [0u16; 16]; // 16 == MAX_COMPUTERNAME_LENGTH + 1
+    let mut len = 16u32;
+    let result = unsafe { GetComputerNameW(buf.as_mut_ptr(), &mut len) };
+    if 0 == result {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(String::from_utf16_lossy(&buf[0 .. len as usize]))
 }
