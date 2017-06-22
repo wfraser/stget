@@ -129,15 +129,25 @@ pub struct SessionBuilder {
     device_id: String,
     remote_tls_hostname: Option<String>,
     device_name: Option<String>,
+    client_cert: super::Certificate,
+    private_key: super::PrivateKey,
 }
 
 impl SessionBuilder {
-    pub fn new(host_and_port: String, device_id: String) -> SessionBuilder {
+    pub fn new(
+        host_and_port: String,
+        device_id: String,
+        client_cert: super::Certificate,
+        private_key: super::PrivateKey,
+        ) -> SessionBuilder
+    {
         SessionBuilder {
             host_and_port: host_and_port,
             device_id: device_id,
             remote_tls_hostname: None,
             device_name: None,
+            client_cert: client_cert,
+            private_key: private_key,
         }
     }
 
@@ -168,6 +178,7 @@ impl SessionBuilder {
         info!("our device name is {:?}", device_name);
 
         let mut config = rustls::ClientConfig::new();
+        config.set_single_client_cert(vec![self.client_cert], self.private_key);
 
         rustls::DangerousClientConfig { cfg: &mut config }
             .set_certificate_verifier(

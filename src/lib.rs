@@ -19,6 +19,9 @@ error_chain! {
     }
 }
 
+pub mod certificate;
 pub mod session;
 pub mod syncthing_proto;
 pub mod util;
+
+pub use certificate::{Certificate, PrivateKey};
