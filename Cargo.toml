@@ -3,14 +3,6 @@ name = "stget"
 version = "0.1.0"
 authors = ["Bill Fraser <wfraser@codewise.org>"]
 
-[[bin]]
-name = "stget"
-path = "bin/main.rs"
-
-[[bin]]
-name = "deviceid"
-path = "bin/deviceid.rs"
-
 [dependencies]
 base32 = "0.3"
 bufstream = "0.1"
