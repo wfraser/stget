@@ -68,5 +68,32 @@ fn main() {
         }
     }
 
-    println!("{}", String::from_utf8_lossy(&data));
+    for i in 0 .. ((data.len() / 16) + 1) {
+        print!("{:04x}  ", i);
+        for h in 0 .. 16 {
+            if i * 16 + h < data.len() {
+                print!("{:02x} ", data[i * 16 + h]);
+            } else {
+                print!("   ");
+            }
+            if h == 8 {
+                print!(" ");
+            }
+        }
+        print!("  |");
+        for h in 0 .. 16 {
+            if i * 16 + h < data.len() {
+                let mut c = data[i * 16 + h] as char;
+                if c < ' ' {
+                    c = '.'
+                }
+                print!("{}", c);
+            } else {
+                print!(" ");
+            }
+        }
+        println!("|");
+    }
+
+    //println!("{}", String::from_utf8_lossy(&data));
 }

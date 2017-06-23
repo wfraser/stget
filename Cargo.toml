@@ -14,6 +14,7 @@ protobuf = "1.2"
 ring = "0.11"
 
 [dependencies.rustls]
-version = "0.9"
-#git = "https://github.com/ctz/rustls"
+#version = "0.9"
+git = "https://github.com/ctz/rustls"
+rev = "b961e91948bdd53476f020dcecaf35f6cc6f4f85" # 2017-06-23T07:44:56Z
 features = ["dangerous_configuration"]

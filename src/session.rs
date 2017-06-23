@@ -182,7 +182,7 @@ impl SessionBuilder {
 
         rustls::DangerousClientConfig { cfg: &mut config }
             .set_certificate_verifier(
-                Box::new(SyncthingCertVerifier::new(self.device_id)));
+                Arc::new(SyncthingCertVerifier::new(self.device_id)));
 
         let host_and_port = &self.host_and_port;
 
