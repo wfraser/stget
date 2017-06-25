@@ -39,6 +39,24 @@ impl Session {
         Ok(())
     }
 
+    pub fn read_hello(buf: &[u8]) -> Result<(usize, syncthing_proto::Hello)> {
+        use protobuf::{CodedInputStream, Message};
+
+        let len = (buf[0] as usize | (buf[1] as usize) << 8) + 2;
+        if len > buf.len() {
+            let msg = format!("Hello message specified length as {:#x}, but only {:#x} bytes were provided",
+                len, buf.len());
+            error!("{}", msg);
+            bail!(msg);
+        }
+
+        let mut input = CodedInputStream::from_bytes(&buf[2..len]);
+        input.read_message().map_err(|e| {
+            error!("error reading Hello: {}", e);
+            e.into()
+        }).map(|hello| (len, hello))
+    }
+
     // FIXME(wfraser) only for testing
     pub fn read_to_end(&mut self, data: &mut Vec<u8>) -> Result<usize> {
         use std::io::Read;
@@ -125,44 +143,16 @@ impl Session {
 }
 
 pub struct SessionBuilder {
-    host_and_port: String,
-    device_id: String,
-    remote_tls_hostname: Option<String>,
-    device_name: Option<String>,
-    client_cert: super::Certificate,
-    private_key: super::PrivateKey,
+    pub remote_host_and_port: String,
+    pub remote_device_id: String,
+    pub local_device_name: Option<String>,
+    pub client_cert: super::Certificate,
+    pub private_key: super::PrivateKey,
 }
 
 impl SessionBuilder {
-    pub fn new(
-        host_and_port: String,
-        device_id: String,
-        client_cert: super::Certificate,
-        private_key: super::PrivateKey,
-        ) -> SessionBuilder
-    {
-        SessionBuilder {
-            host_and_port: host_and_port,
-            device_id: device_id,
-            remote_tls_hostname: None,
-            device_name: None,
-            client_cert: client_cert,
-            private_key: private_key,
-        }
-    }
-
-    pub fn remote_tls_hostname(mut self, cn: String) -> Self {
-        self.remote_tls_hostname = Some(cn);
-        self
-    }
-
-    pub fn device_name(mut self, name: String) -> Self {
-        self.device_name = Some(name);
-        self
-    }
-
     pub fn connect(self) -> Result<Session> {
-        let device_name = match self.device_name {
+        let device_name = match self.local_device_name {
             Some(name) => name,
             None => match util::get_hostname() {
                 Ok(name) => {
@@ -179,22 +169,20 @@ impl SessionBuilder {
 
         let mut config = rustls::ClientConfig::new();
         config.set_single_client_cert(vec![self.client_cert], self.private_key);
+        config.alpn_protocols.push("BEP/1.0".to_string());
 
         rustls::DangerousClientConfig { cfg: &mut config }
             .set_certificate_verifier(
-                Arc::new(SyncthingCertVerifier::new(self.device_id)));
+                Arc::new(SyncthingCertVerifier::new(self.remote_device_id)));
 
-        let host_and_port = &self.host_and_port;
-
+        let host_and_port = &self.remote_host_and_port;
         let stream = TcpStream::connect(host_and_port).map_err(|e| {
             error!("failed to connect to {}: {}", host_and_port, e);
             e
         })?;
 
-        let cn = self.remote_tls_hostname.as_ref().map(|s| s.as_str()).unwrap_or("syncthing");
-
         Ok(Session {
-            tls: rustls::ClientSession::new(&Arc::new(config), cn),
+            tls: rustls::ClientSession::new(&Arc::new(config), "syncthing"),
             stream: stream,
             device_name: device_name,
         })

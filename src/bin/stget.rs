@@ -19,25 +19,20 @@ error_chain! {
 fn main() {
     env_logger::init().unwrap();
 
-    let (host_and_port, cn, device_id) =
-        ("127.0.0.1:22000", "syncthing", "JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH");
-        //("odin.codewise.org:443", "odin.codewise.org", "ODHDPS7-OMUJMIS-XS3ZKPX-SM6YAU5-KN2WEXK-F65DPTB-DCN4KMU-MACHMQS");
+    // hardcoded for development; TODO(wfraser) get from command-line arguments eventually
+    let (host_and_port, device_id) =
+        ("127.0.0.1:22000", "JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH");
 
     let cert = stget::certificate::read_cert_file_pem(Path::new("cert/cert.pem")).unwrap();
     let key = stget::certificate::read_key_file_pem(Path::new("cert/private.pem")).unwrap();
 
-    let mut session = stget::session::SessionBuilder::new(host_and_port.to_owned(), device_id.to_owned(), cert, key)
-        .remote_tls_hostname(cn.to_owned())
-        .connect().unwrap();
-
-    /*
-    session.write(b"GET / HTTP/1.0\r\n\
-                  Host: odin.codewise.org\r\n\
-                  Connection: close\r\n\
-                  Accept-Encoding: identity\r\n\
-                  \r\n")
-            .unwrap();
-    */
+    let mut session = stget::session::SessionBuilder {
+        remote_host_and_port: host_and_port.to_string(),
+        remote_device_id: device_id.to_string(),
+        local_device_name: None,
+        client_cert: cert,
+        private_key: key,
+    }.connect().expect("Failed to create TLS session");
 
     session.write_hello().unwrap();
 
@@ -95,5 +90,15 @@ fn main() {
         println!("|");
     }
 
-    //println!("{}", String::from_utf8_lossy(&data));
+    let (len, remote_hello): (usize, stget::syncthing_proto::Hello) =
+        stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
+            println!("error reading remote hello: {}", e);
+            panic!(e);
+        });
+    data.drain(0..len);
+
+    println!("Remote is {}, running {} v{}",
+        remote_hello.device_name,
+        remote_hello.client_name,
+        remote_hello.client_version);
 }

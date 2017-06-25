@@ -35,7 +35,7 @@ pub fn read_key_file_pem(path: &Path) -> Result<PrivateKey> {
     let file = File::open(path)
         .chain_err(|| format!("failed to open private key file {:?}", path))?;
     let mut r = BufReader::new(file);
-    let mut keys = match pemfile::pkcs8_private_keys(&mut r) {
+    let mut keys = match pemfile::rsa_private_keys(&mut r) {
         Ok(keys) => keys,
         Err(()) => bail!(format!("failed to read private key {:?} for some reason", path)),
     };
