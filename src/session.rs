@@ -173,7 +173,7 @@ impl SessionBuilder {
 
         let mut config = rustls::ClientConfig::new();
         config.set_single_client_cert(vec![self.client_cert], self.private_key);
-        config.alpn_protocols.push("BEP/1.0".to_string());
+        config.alpn_protocols.push("bep/1.0".to_owned());
 
         rustls::DangerousClientConfig { cfg: &mut config }
             .set_certificate_verifier(
