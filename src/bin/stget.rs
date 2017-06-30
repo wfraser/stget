@@ -97,7 +97,7 @@ fn main() {
         });
     data.drain(0..len);
 
-    println!("Remote is {}, running {} v{}",
+    println!("Remote is {}, running {} {}",
         remote_hello.device_name,
         remote_hello.client_name,
         remote_hello.client_version);

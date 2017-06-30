@@ -5,6 +5,8 @@ use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
 
+use byteorder::{ByteOrder, NetworkEndian};
+use protobuf;
 use ring;
 use rustls;
 
@@ -18,8 +20,8 @@ pub struct Session {
 
 impl Session {
     pub fn write_hello(&mut self) -> Result<()> {
-        use protobuf::{CodedOutputStream, Message};
-        let mut output = CodedOutputStream::new(&mut self.tls);
+        use protobuf::Message;
+        let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
 
         output.write_uint32_no_tag(HELLO_MAGIC)?;
 
@@ -29,9 +31,9 @@ impl Session {
         hello.set_client_version(env!("CARGO_PKG_VERSION").to_owned());
         hello.compute_size();
 
-        output.write_raw_bytes(&[
-            ((hello.get_cached_size() & 0xFF00) >> 8) as u8,
-            (hello.get_cached_size() & 0xFF) as u8])?;
+        let mut len = [0u8;2];
+        NetworkEndian::write_u16(&mut len, hello.get_cached_size() as u16);
+        output.write_raw_bytes(&len)?;
 
         hello.write_to_with_cached_sizes(&mut output)?;
         output.flush()?;
@@ -40,21 +42,23 @@ impl Session {
     }
 
     pub fn read_hello(buf: &[u8]) -> Result<(usize, syncthing_proto::Hello)> {
-        use protobuf::{CodedInputStream, Message};
+        use protobuf::Message;
+        let mut input = protobuf::CodedInputStream::from_bytes(buf);
 
-        let len = (buf[0] as usize | (buf[1] as usize) << 8) + 2;
-        if len > buf.len() {
-            let msg = format!("Hello message specified length as {:#x}, but only {:#x} bytes were provided",
-                len, buf.len());
-            error!("{}", msg);
-            bail!(msg);
+        let magic = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
+        if magic != HELLO_MAGIC {
+            bail!("incorrect magic number: {:#x} (expected {:#x})", magic, HELLO_MAGIC);
         }
 
-        let mut input = CodedInputStream::from_bytes(&buf[2..len]);
-        input.read_message().map_err(|e| {
-            error!("error reading Hello: {}", e);
-            e.into()
-        }).map(|hello| (len, hello))
+        let len = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
+        input.push_limit(len as u64)?;
+        debug!("hello message length specified as {:#x}; we have {:#x} bytes",
+                len, buf.len() as u64 - input.pos());
+
+        let mut hello = syncthing_proto::Hello::new();
+        hello.merge_from(&mut input).chain_err(|| "error reading Hello")?;
+
+        Ok((input.pos() as usize, hello))
     }
 
     // FIXME(wfraser) only for testing

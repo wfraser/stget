@@ -6,6 +6,7 @@ authors = ["Bill Fraser <wfraser@codewise.org>"]
 [dependencies]
 base32 = "0.3"
 bufstream = "0.1"
+byteorder = "1.0"
 env_logger = "0.4"
 error-chain = "0.9"
 libc = "0.2"
