@@ -1,11 +1,10 @@
 #![allow(unknown_lints)]
 
+extern crate clap;
 extern crate env_logger;
 #[macro_use] extern crate error_chain;
 #[macro_use] extern crate log;
 extern crate stget;
-
-use std::path::Path;
 
 error_chain! {
     foreign_links {
@@ -19,12 +18,66 @@ error_chain! {
 fn main() {
     env_logger::init().unwrap();
 
-    // hardcoded for development; TODO(wfraser) get from command-line arguments eventually
+    let matches = clap::App::new(env!("CARGO_PKG_NAME"))
+            .version(env!("CARGO_PKG_VERSION"))
+            .author(env!("CARGO_PKG_AUTHORS"))
+            .about("experimental Syncthing file retrieval program")
+            .arg(clap::Arg::with_name("address")
+                    .help("Address of the remote host. Port 22000 is used if unspecified.")
+                    .required(true)
+                    .index(1))
+            .arg(clap::Arg::with_name("device_id")
+                    .help("Device ID of the remote host.")
+                    .required(true)
+                    .index(2))
+            .arg(clap::Arg::with_name("path")
+                    .help("File path to fetch.")
+                    .index(3))
+            .arg(clap::Arg::with_name("list")
+                    .short("l")
+                    .long("list")
+                    .takes_value(false)
+                    .help("List all files on the remote end."))
+            .group(clap::ArgGroup::with_name("path_or_list")
+                    .args(&["path", "list"])
+                    .required(true))
+            .get_matches();
+
+    let host_and_port = match matches.value_of("address").unwrap() {
+        host if host.contains(':') => host.to_owned(),
+        host => {
+            debug!("no port specified; assuming 22000");
+            format!("{}:22000", host)
+        }
+    };
+
+    let device_id = matches.value_of("device_id").unwrap();
+
+    /*
+    // FIXME(wfraser) remove this
     let (host_and_port, device_id) =
         ("127.0.0.1:22000", "JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH");
+    */
 
-    let cert = stget::certificate::read_cert_file_pem(Path::new("cert/cert.pem")).unwrap();
-    let key = stget::certificate::read_key_file_pem(Path::new("cert/private.pem")).unwrap();
+    // TODO(wfraser) base path should be in $XDG_CONFIG_DIRS or something
+    let base_path = std::env::current_dir().unwrap_or_else(|e| {
+        panic!("unable to get working directory: {}", e);
+    });
+
+    // TODO(wfraser) make this configurable
+    let cert_path = base_path.join("cert").join("cert.pem");
+    let key_path = base_path.join("cert").join("private.pem");
+
+    let cert = stget::certificate::read_cert_file_pem(&cert_path).unwrap_or_else(|e| {
+        println!("Unable to load certificate {:?}: {}", cert_path, e);
+        println!("Did you remember to generate a client certificate?");
+        std::process::exit(1);
+    });
+    let key = stget::certificate::read_key_file_pem(&key_path).unwrap_or_else(|e| {
+        println!("Unable to load private key {:?}: {}", key_path, e);
+        println!("Did you remember to generate a client certificate?");
+        std::process::exit(1);
+    });
 
     let mut session = stget::session::SessionBuilder {
         remote_host_and_port: host_and_port.to_string(),

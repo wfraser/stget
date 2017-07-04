@@ -1,44 +1,44 @@
+extern crate clap;
 extern crate ring;
+extern crate rustls;
 extern crate stget;
 
-use std::env;
-use std::fs::File;
+use std::path::Path;
 use std::process::exit;
+use rustls::internal::msgs::codec::Codec;
 
 fn main() {
-    let args = env::args_os().collect::<Vec<_>>();
-    if args.len() != 2 {
-        println!("usage: {} <file>", args[0].to_string_lossy());
-        println!("Calculates the Syncthing Device ID of a given DER-encoded certificate.");
-        exit(-1);
-    }
+    let matches = clap::App::new("deviceid")
+            .help("Calculates the Syncthing Device ID of a given DER- or PEM-encoded certificate.")
+            .arg(clap::Arg::with_name("der")
+                .long("der")
+                .takes_value(false))
+            .arg(clap::Arg::with_name("pem")
+                .long("pem")
+                .takes_value(false))
+            .group(clap::ArgGroup::with_name("format")
+                .args(&["der", "pem"])
+                .required(true))
+            .arg(clap::Arg::with_name("path")
+                .required(true))
+            .get_matches();
 
-    let mut f = File::open(&args[1]).unwrap_or_else(|e| {
-        println!("Error opening {:?}: {}", args[1], e);
+    let path = Path::new(matches.value_of_os("path").unwrap());
+    let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
+
+    let cert = if matches.is_present("der") {
+        // NOTE: no verification of the format is done here! Garbage in, garbage out.
+        stget::certificate::read_cert_file_der(path)
+    } else if matches.is_present("pem") {
+        stget::certificate::read_cert_file_pem(path)
+    } else {
+        panic!("no format selected");
+    }.unwrap_or_else(|e| {
+        println!("{:?}: {}", path, e);
         exit(1);
     });
 
-    // TODO: check for PEM-encoded cert and do the conversion to DER
-
-    let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
-    loop {
-        use std::io::Read;
-        let mut buf = [0u8; 512];
-        match f.read(&mut buf) {
-            Ok(n) => {
-                if n != 0 {
-                    hash_ctx.update(&buf[0..n]);
-                }
-                if n < buf.len() {
-                    break;
-                }
-            },
-            Err(e) => {
-                println!("read error: {}", e);
-                exit(1);
-            }
-        }
-    }
+    hash_ctx.update(&cert.get_encoding()[3..]); // 3 bytes indicate the length.
 
     let digest = hash_ctx.finish();
     println!("hash: {:?}", digest);
