@@ -112,6 +112,11 @@ fn main() {
                     println!("done");
                     break;
                 }
+                if n > 0 {
+                    // TODO: just got hello message; bail out and print it because we don't support
+                    // doing anything else yet.
+                    break;
+                }
             }
         }
     }
