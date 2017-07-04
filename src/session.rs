@@ -23,7 +23,9 @@ impl Session {
         use protobuf::Message;
         let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
 
-        output.write_uint32_no_tag(HELLO_MAGIC)?;
+        let mut magic = [0u8;4];
+        NetworkEndian::write_u32(&mut magic, HELLO_MAGIC);
+        output.write_raw_bytes(&magic)?;
 
         let mut hello = syncthing_proto::Hello::new();
         hello.set_device_name(self.device_name.clone());
