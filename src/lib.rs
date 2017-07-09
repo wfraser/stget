@@ -2,6 +2,7 @@
 
 extern crate base32;
 extern crate byteorder;
+extern crate compress;
 #[macro_use] extern crate error_chain;
 extern crate libc;
 #[macro_use] extern crate log;

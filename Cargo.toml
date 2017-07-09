@@ -20,3 +20,9 @@ ring = "0.11"
 git = "https://github.com/ctz/rustls"
 rev = "b961e91948bdd53476f020dcecaf35f6cc6f4f85" # 2017-06-23T07:44:56Z
 features = ["dangerous_configuration"]
+
+[dependencies.compress]
+# TODO(wfraser): extract the LZ4 decompressor from this; it's the only part needed from this
+# semi-busted crate
+git = "https://github.com/alexcrichton/rust-compress"
+rev = "4e1c67b7bd169c94b594d7ee1699a079aea38924"

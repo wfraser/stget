@@ -6,7 +6,9 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use byteorder::{ByteOrder, NetworkEndian};
+use compress;
 use protobuf;
+use protobuf::Message as ProtobufMessage;
 use ring;
 use rustls;
 
@@ -20,7 +22,6 @@ pub struct Session {
 
 impl Session {
     pub fn write_hello(&mut self) -> Result<()> {
-        use protobuf::Message;
         let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
 
         let mut magic = [0u8;4];
@@ -31,10 +32,9 @@ impl Session {
         hello.set_device_name(self.device_name.clone());
         hello.set_client_name(env!("CARGO_PKG_NAME").to_owned());
         hello.set_client_version(env!("CARGO_PKG_VERSION").to_owned());
-        hello.compute_size();
 
         let mut len = [0u8;2];
-        NetworkEndian::write_u16(&mut len, hello.get_cached_size() as u16);
+        NetworkEndian::write_u16(&mut len, hello.compute_size() as u16);
         output.write_raw_bytes(&len)?;
 
         hello.write_to_with_cached_sizes(&mut output)?;
@@ -44,7 +44,6 @@ impl Session {
     }
 
     pub fn read_hello(buf: &[u8]) -> Result<(usize, syncthing_proto::Hello)> {
-        use protobuf::Message;
         let mut input = protobuf::CodedInputStream::from_bytes(buf);
 
         let magic = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
@@ -61,6 +60,73 @@ impl Session {
         hello.merge_from(&mut input).chain_err(|| "error reading Hello")?;
 
         Ok((input.pos() as usize, hello))
+    }
+
+    pub fn read_message<T: ProtobufMessage + protobuf::MessageStatic>(buf: &[u8]) -> Result<(usize, T)> {
+        let mut input = protobuf::CodedInputStream::from_bytes(buf);
+
+        let header_length = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
+        let mut header = syncthing_proto::Header::new();
+        let old_limit = input.push_limit(header_length as u64)?;
+        header.merge_from(&mut input).chain_err(|| "error reading message header")?;
+        input.pop_limit(old_limit);
+
+        debug!("header: {:?}, compression: {:?}", header.get_field_type(), header.get_compression());
+
+        let body_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
+        debug!("body length = {} / {:#x}", body_length, body_length);
+
+        let mut body_protobuf = vec![];
+        match header.get_compression() {
+            syncthing_proto::MessageCompression::LZ4 => {
+                let uncompressed_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
+                debug!("uncompressed length = {} / {:#x}", uncompressed_length, uncompressed_length);
+                let n = compress::lz4::decode_block(&buf[input.pos() as usize ..], &mut body_protobuf);
+                debug!("{} / {:#x} LZ4 bytes processed", n, n);
+                if body_protobuf.len() as u32 != uncompressed_length {
+                    bail!("uncompressed LZ4 data ({} bytes) doesn't match expected length ({} bytes)",
+                            body_protobuf.len(), uncompressed_length);
+                }
+                input.skip_raw_bytes(body_length - 4)?;
+            },
+            syncthing_proto::MessageCompression::NONE => {
+                input.read_raw_bytes_into(body_length, &mut body_protobuf)?;
+            }
+        }
+
+        let mut body_input = protobuf::CodedInputStream::from_bytes(&body_protobuf);
+        let mut body = T::new();
+        body.merge_from(&mut body_input)?;
+
+        debug!("body_input pos: {}", body_input.pos());
+
+        Ok((input.pos() as usize, body))
+    }
+
+    pub fn write_message<T: ProtobufMessage + protobuf::MessageStatic>(
+        &mut self,
+        message: T,
+        message_type: syncthing_proto::MessageType,
+        ) -> Result<()>
+    {
+        let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
+
+        let mut header = syncthing_proto::Header::new();
+        header.set_compression(syncthing_proto::MessageCompression::NONE);
+        header.set_field_type(message_type);
+
+        let mut header_len = [0u8; 2];
+        NetworkEndian::write_u16(&mut header_len, header.compute_size() as u16);
+        output.write_raw_bytes(&header_len)?;
+        header.write_to_with_cached_sizes(&mut output)?;
+
+        let mut body_len = [0u8; 4];
+        NetworkEndian::write_u32(&mut body_len, message.compute_size());
+        output.write_raw_bytes(&body_len)?;
+        message.write_to_with_cached_sizes(&mut output)?;
+
+        output.flush()?;
+        Ok(())
     }
 
     // FIXME(wfraser) only for testing
