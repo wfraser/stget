@@ -20,6 +20,11 @@ error_chain! {
     }
 }
 
+struct FolderInfo {
+    label: String,
+    max_remote_seq: i64,
+}
+
 fn main() {
     env_logger::init().unwrap();
 
@@ -57,6 +62,7 @@ fn main() {
     };
 
     let device_id = args.value_of("device_id").unwrap();
+    let remote_cert_hash = stget::util::hash_from_device_id(device_id);
 
     /*
     // FIXME(wfraser) remove this
@@ -84,7 +90,7 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut folders_by_id = HashMap::<String, String>::new();
+    let mut folders_by_id = HashMap::<String, FolderInfo>::new();
 
     let mut session = stget::session::SessionBuilder {
         remote_host_and_port: host_and_port.to_string(),
@@ -155,7 +161,17 @@ fn main() {
                             let mut cluster_config = proto::ClusterConfig::new();
 
                             for folder in remote_cluster_config.get_folders() {
-                                folders_by_id.insert(folder.get_id().to_owned(), folder.get_label().to_owned());
+                                for device in folder.get_devices() {
+                                    let device_cert_hash: &[u8] = device.get_id();
+                                    if device_cert_hash == remote_cert_hash.as_slice() {
+                                    folders_by_id.insert(
+                                        folder.get_id().to_owned(),
+                                        FolderInfo {
+                                            label: folder.get_label().to_owned(),
+                                            max_remote_seq: device.get_max_sequence(),
+                                        });
+                                    }
+                                }
                             }
 
                             if args.is_present("list") {
@@ -234,33 +250,39 @@ fn main() {
 
                             debug!("remote index: {:#?}", index);
 
+                            let folder_info = &folders_by_id[index.get_folder()];
+                            let files = index.get_files();
+
                             if args.is_present("list") {
-                                let folder_label = &folders_by_id[index.get_folder()];
-                                for file in index.get_files() {
+                                for file in files {
                                     if file.get_field_type() == proto::FileInfoType::DIRECTORY
                                             || file.get_deleted()
                                     {
                                         continue;
                                     }
-                                    println!("{}/{}", folder_label, file.get_name());
+                                    println!("{}/{}", folder_info.label, file.get_name());
                                 }
                             } else {
                                 unimplemented!("fetching a file not yet implemented");
                             }
 
-                            println!("{} files", index.get_files().len());
+                            println!("{} files", files.len());
 
-                            // FIXME: just reading the right number of Index messages is
-                            // insufficient, because if the index is very large, it has some unknown
-                            // number of IndexUpdate messages that will come after it.
-                            /*
-                            if index_n + 1 < folders_by_id.len() {
-                                state = Some(State::ExpectIndex(index_n + 1));
+                            if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
+                                // Note that this assumes nothing changed in between when we got the
+                                // cluster config and now.
+                                // It also assumes that the files in each message are sorted by
+                                // sequence number.
+                                debug!("got last index update for this folder");
+                                if index_n + 1 == folders_by_id.len() {
+                                    debug!("at last folder; ending");
+                                    break;
+                                } else {
+                                    state = Some(State::ExpectIndex(index_n + 1));
+                                }
                             } else {
-                                break;
+                                state = Some(State::ExpectIndex(index_n));
                             }
-                            */
-                            state = Some(State::ExpectIndex(index_n));
                         }
                         None => unreachable!(),
                     }

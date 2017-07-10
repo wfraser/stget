@@ -1,5 +1,7 @@
 use std::io;
 use base32;
+
+#[cfg(unix)]
 use libc;
 
 #[allow(many_single_char_names)]
@@ -30,6 +32,35 @@ fn test_device_id() {
 
     assert_eq!("JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH",
                device_id_from_hash(&hash));
+}
+
+pub fn hash_from_device_id(device_id: &str) -> Vec<u8> {
+    // xxxxxxx-xxxxxxA-xxxxxxx-xxxxxxB-xxxxxxx-xxxxxxC-xxxxxxx-xxxxxxD
+    // 000000000011111111112222222222333333333344444444445555555555666
+    // 012345678901234567890123456789012345678901234567890123456789012
+    // JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH
+
+    let mut base32_input = String::new();
+    base32_input.push_str(&device_id[0..7]);
+    base32_input.push_str(&device_id[8..14]);
+    base32_input.push_str(&device_id[16..23]);
+    base32_input.push_str(&device_id[24..30]);
+    base32_input.push_str(&device_id[32..39]);
+    base32_input.push_str(&device_id[40..46]);
+    base32_input.push_str(&device_id[48..55]);
+    base32_input.push_str(&device_id[56..62]);
+    base32::decode(base32::Alphabet::RFC4648 { padding: false }, &base32_input).unwrap()
+}
+
+#[test]
+fn test_reverse_device_id() {
+    let hash = vec![
+        0x48, 0xcb, 0xde, 0xc7, 0xb0, 0x82, 0x43, 0x7a,
+        0x42, 0x0f, 0x95, 0x4b, 0x33, 0x94, 0x40, 0xaf,
+        0xbe, 0xd9, 0x55, 0x9f, 0x46, 0x94, 0x10, 0x7d,
+        0xfc, 0x61, 0x9c, 0x04, 0x44, 0xa0, 0xda, 0x38];
+
+    assert_eq!(&hash, &hash_from_device_id("JDF55R5-QQJBXUN-QQPSVFT-HFCAV6J-7NSVM7I-2KBA7PI-4MGOAIR-FA3I4AH"));
 }
 
 /// This is similar to Luhn mod 32, except with some bugs that are in the Syncthing implementation:
