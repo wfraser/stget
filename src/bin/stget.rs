@@ -20,11 +20,6 @@ error_chain! {
     }
 }
 
-struct FolderInfo {
-    label: String,
-    max_remote_seq: i64,
-}
-
 fn main() {
     env_logger::init().unwrap();
 
@@ -90,8 +85,6 @@ fn main() {
         std::process::exit(1);
     });
 
-    let mut folders_by_id = HashMap::<String, FolderInfo>::new();
-
     let mut session = stget::session::SessionBuilder {
         remote_host_and_port: host_and_port.to_string(),
         remote_device_id: device_id.to_string(),
@@ -101,14 +94,21 @@ fn main() {
     }.connect().expect("Failed to create TLS session");
 
     session.write_hello().unwrap();
-    let mut state = Some(State::ExpectHello);
+
+    let mut program_state = ProgramState {
+        remote_cert_hash: remote_cert_hash,
+        folders_by_id: HashMap::new(),
+        list_mode: args.is_present("list"),
+        path: args.value_of("path").map(|s| s.to_owned()),
+        protocol_state: Some(State::ExpectHello),
+    };
 
     let mut data = vec![];
     while let Ok((r, w)) = session.complete_io() {
         if r == 0 && w == 0 {
             break;
         }
-        println!("r = {}, w = {}", r, w);
+        debug!("r = {}, w = {}", r, w);
         let data_len = data.len();
         match session.read_to_end(&mut data) {
             Err(stget::Error(stget::ErrorKind::Io(ref e), _))
@@ -117,11 +117,11 @@ fn main() {
                 break;
             },
             Err(e) => {
-                println!("len was {}, now is {}", data_len, data.len());
+                debug!("len was {}, now is {}", data_len, data.len());
                 panic!("read error: {:?}", e)
             },
             Ok(n) => {
-                println!("read {}", n);
+                debug!("read {}", n);
                 /*
                 if w == 0 && n == r {
                     println!("done");
@@ -130,168 +130,16 @@ fn main() {
                 */
 
                 if n > 0 {
-                    match state.take() {
-                        Some(State::ExpectHello) => {
-                            hexdump(&data);
-                            let (len, remote_hello): (usize, proto::Hello) =
-                                stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
-                                    println!("error reading remote hello: {}", e);
-                                    panic!(e);
-                                });
-                            println!("Remote is \"{}\", running {} {}",
-                                    remote_hello.device_name,
-                                    remote_hello.client_name,
-                                    remote_hello.client_version);
-                            data.drain(0..len);
-
-                            // Wait to send cluster config until we read the remote one.
-                            state = Some(State::ExpectClusterConfig);
-                        },
-                        Some(State::ExpectClusterConfig) => {
-                            hexdump(&data);
-                            let (len, remote_cluster_config) = stget::session::Session::read_message::<proto::ClusterConfig>(&data)
-                                .unwrap_or_else(|e| {
-                                    println!("Error reading remote cluster config: {}", e);
-                                    panic!(e);
-                                });
-                            data.drain(0..len);
-
-                            println!("remote cluster config: {:#?}", remote_cluster_config);
-
-                            let mut cluster_config = proto::ClusterConfig::new();
-
-                            for folder in remote_cluster_config.get_folders() {
-                                for device in folder.get_devices() {
-                                    let device_cert_hash: &[u8] = device.get_id();
-                                    if device_cert_hash == remote_cert_hash.as_slice() {
-                                    folders_by_id.insert(
-                                        folder.get_id().to_owned(),
-                                        FolderInfo {
-                                            label: folder.get_label().to_owned(),
-                                            max_remote_seq: device.get_max_sequence(),
-                                        });
-                                    }
-                                }
-                            }
-
-                            if args.is_present("list") {
-                                // make a cluster config with all the folders in the remote
-                                for remote_folder in remote_cluster_config.get_folders() {
-                                    let mut folder = proto::Folder::new();
-                                    folder.set_id(remote_folder.get_id().to_owned());
-                                    folder.set_label(remote_folder.get_label().to_owned());
-                                    folder.set_read_only(true);
-                                    folder.set_ignore_permissions(true);
-                                    folder.set_ignore_delete(true);
-                                    folder.set_disable_temp_indexes(true);
-                                    cluster_config.mut_folders().push(folder);
-                                }
-                            } else {
-                                let folder_name = args.value_of("path").unwrap()
-                                    .splitn(2, '/').next().unwrap();
-
-                                let mut folder_id = None;
-                                for folder in remote_cluster_config.get_folders() {
-                                    if folder.get_label() == folder_name {
-                                        folder_id = Some(folder.get_id());
-                                        break;
-                                    }
-                                }
-                                if folder_id.is_none() {
-                                    println!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
-                                    println!("it offered:");
-                                    for folder in remote_cluster_config.get_folders() {
-                                        println!("    {} ({})", folder.get_label(), folder.get_id());
-                                    }
-                                    std::process::exit(1);
-                                }
-
-                                let mut folder = proto::Folder::new();
-                                folder.set_id(folder_id.unwrap().to_owned());
-                                folder.set_label(folder_name.to_owned());
-                                folder.set_read_only(true);
-                                folder.set_ignore_permissions(true);
-                                folder.set_ignore_delete(true);
-                                folder.set_disable_temp_indexes(true);
-                                cluster_config.mut_folders().push(folder);
-                            }
-
-                            debug!("sending cluster config");
-                            session.write_message(
-                                    cluster_config,
-                                    proto::MessageType::CLUSTER_CONFIG)
-                                .unwrap_or_else(|e| {
-                                    println!("error sending our cluster config: {}", e);
-                                    panic!(e);
-                                });
-
-                            state = Some(State::ExpectIndex(0));
-                        },
-                        Some(State::ExpectIndex(index_n)) => {
-                            let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
-                            let body_len = NetworkEndian::read_u32(&data[
-                                2 + header_len as usize
-                                 .. 2 + header_len as usize + 4]) as usize;
-                            if data.len() < header_len + body_len {
-                                debug!("not enough data; reading more (need {}, have {})",
-                                        header_len + body_len, data.len());
-                                state = Some(State::ExpectIndex(index_n));
-                                continue;
-                            }
-                            //hexdump(&data);
-
-                            let (len, index) = stget::session::Session::read_message::<proto::Index>(&data)
-                                .unwrap_or_else(|e| {
-                                    println!("Error reading remote index: {}", e);
-                                    panic!(e);
-                                });
-                            println!("{} bytes read", len);
-                            data.drain(0..len);
-
-                            debug!("remote index: {:#?}", index);
-
-                            let folder_info = &folders_by_id[index.get_folder()];
-                            let files = index.get_files();
-
-                            if args.is_present("list") {
-                                for file in files {
-                                    if file.get_field_type() == proto::FileInfoType::DIRECTORY
-                                            || file.get_deleted()
-                                    {
-                                        continue;
-                                    }
-                                    println!("{}/{}", folder_info.label, file.get_name());
-                                }
-                            } else {
-                                unimplemented!("fetching a file not yet implemented");
-                            }
-
-                            println!("{} files", files.len());
-
-                            if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
-                                // Note that this assumes nothing changed in between when we got the
-                                // cluster config and now.
-                                // It also assumes that the files in each message are sorted by
-                                // sequence number.
-                                debug!("got last index update for this folder");
-                                if index_n + 1 == folders_by_id.len() {
-                                    debug!("at last folder; ending");
-                                    break;
-                                } else {
-                                    state = Some(State::ExpectIndex(index_n + 1));
-                                }
-                            } else {
-                                state = Some(State::ExpectIndex(index_n));
-                            }
-                        }
-                        None => unreachable!(),
+                    process_network_data(&mut program_state, &mut session, &mut data);
+                    if program_state.protocol_state.is_none() {
+                        break;
                     }
                 }
             }
         }
     }
 
-    if state == Some(State::ExpectHello) {
+    if program_state.protocol_state == Some(State::ExpectHello) {
         println!("Remote declined to talk with us.");
         let (_len, remote_hello): (usize, proto::Hello) =
         stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
@@ -305,12 +153,183 @@ fn main() {
     }
 }
 
+fn process_network_data(program: &mut ProgramState, session: &mut stget::session::Session, data: &mut Vec<u8>) {
+    match program.protocol_state.take() {
+        Some(State::ExpectHello) => {
+            hexdump(&data);
+            let (len, remote_hello): (usize, proto::Hello) =
+                stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
+                    println!("error reading remote hello: {}", e);
+                    panic!(e);
+                });
+            println!("Remote is \"{}\", running {} {}",
+                    remote_hello.device_name,
+                    remote_hello.client_name,
+                    remote_hello.client_version);
+            data.drain(0..len);
+
+            // Wait to send cluster config until we read the remote one.
+            program.protocol_state = Some(State::ExpectClusterConfig);
+        },
+        Some(State::ExpectClusterConfig) => {
+            hexdump(&data);
+            let (len, remote_cluster_config) = stget::session::Session::read_message::<proto::ClusterConfig>(&data)
+                .unwrap_or_else(|e| {
+                    println!("Error reading remote cluster config: {}", e);
+                    panic!(e);
+                });
+            data.drain(0..len);
+
+            debug!("remote cluster config: {:#?}", remote_cluster_config);
+
+            let mut cluster_config = proto::ClusterConfig::new();
+
+            for folder in remote_cluster_config.get_folders() {
+                for device in folder.get_devices() {
+                    let device_cert_hash: &[u8] = device.get_id();
+                    if device_cert_hash == program.remote_cert_hash.as_slice() {
+                    program.folders_by_id.insert(
+                        folder.get_id().to_owned(),
+                        FolderInfo {
+                            label: folder.get_label().to_owned(),
+                            max_remote_seq: device.get_max_sequence(),
+                        });
+                    }
+                }
+            }
+
+            if program.list_mode {
+                // make a cluster config with all the folders in the remote
+                for remote_folder in remote_cluster_config.get_folders() {
+                    let mut folder = proto::Folder::new();
+                    folder.set_id(remote_folder.get_id().to_owned());
+                    folder.set_label(remote_folder.get_label().to_owned());
+                    folder.set_read_only(true);
+                    folder.set_ignore_permissions(true);
+                    folder.set_ignore_delete(true);
+                    folder.set_disable_temp_indexes(true);
+                    cluster_config.mut_folders().push(folder);
+                }
+            } else {
+                let folder_name = program.path.as_ref().unwrap()
+                    .splitn(2, '/').next().unwrap();
+
+                let mut folder_id = None;
+                for folder in remote_cluster_config.get_folders() {
+                    if folder.get_label() == folder_name {
+                        folder_id = Some(folder.get_id());
+                        break;
+                    }
+                }
+                if folder_id.is_none() {
+                    println!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
+                    println!("it offered:");
+                    for folder in remote_cluster_config.get_folders() {
+                        println!("    {} ({})", folder.get_label(), folder.get_id());
+                    }
+                    std::process::exit(1);
+                }
+
+                let mut folder = proto::Folder::new();
+                folder.set_id(folder_id.unwrap().to_owned());
+                folder.set_label(folder_name.to_owned());
+                folder.set_read_only(true);
+                folder.set_ignore_permissions(true);
+                folder.set_ignore_delete(true);
+                folder.set_disable_temp_indexes(true);
+                cluster_config.mut_folders().push(folder);
+            }
+
+            debug!("sending cluster config");
+            session.write_message(
+                    cluster_config,
+                    proto::MessageType::CLUSTER_CONFIG)
+                .unwrap_or_else(|e| {
+                    println!("error sending our cluster config: {}", e);
+                    panic!(e);
+                });
+
+            program.protocol_state = Some(State::ExpectIndex(0));
+        },
+        Some(State::ExpectIndex(index_n)) => {
+            let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
+            let body_len = NetworkEndian::read_u32(&data[
+                2 + header_len as usize
+                    .. 2 + header_len as usize + 4]) as usize;
+            if data.len() < header_len + body_len {
+                debug!("not enough data; reading more (need {}, have {})",
+                        header_len + body_len, data.len());
+                program.protocol_state = Some(State::ExpectIndex(index_n));
+                return;
+            }
+            //hexdump(&data);
+
+            let (len, index) = stget::session::Session::read_message::<proto::Index>(&data)
+                .unwrap_or_else(|e| {
+                    println!("Error reading remote index: {}", e);
+                    panic!(e);
+                });
+            debug!("{} bytes read", len);
+            data.drain(0..len);
+
+            debug!("remote index: {:#?}", index);
+
+            let folder_info = &program.folders_by_id[index.get_folder()];
+            let files = index.get_files();
+
+            if program.list_mode {
+                for file in files {
+                    if file.get_field_type() == proto::FileInfoType::DIRECTORY
+                            || file.get_deleted()
+                    {
+                        continue;
+                    }
+                    println!("{}/{}", folder_info.label, file.get_name());
+                }
+            } else {
+                unimplemented!("fetching a file not yet implemented");
+            }
+
+            if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
+                // Note that this assumes nothing changed in between when we got the
+                // cluster config and now.
+                // It also assumes that the files in each message are sorted by
+                // sequence number.
+                debug!("got last index update for this folder");
+                if index_n + 1 == program.folders_by_id.len() {
+                    debug!("at last folder; ending");
+                    return;
+                } else {
+                    program.protocol_state = Some(State::ExpectIndex(index_n + 1));
+                }
+            } else {
+                program.protocol_state = Some(State::ExpectIndex(index_n));
+            }
+        }
+        None => panic!("bad state"),
+    }
+}
+
+#[derive(Debug)]
+struct ProgramState {
+    remote_cert_hash: Vec<u8>,
+    folders_by_id: HashMap<String, FolderInfo>,
+    list_mode: bool,
+    path: Option<String>,
+    protocol_state: Option<State>,
+}
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 enum State {
     ExpectHello,
     ExpectClusterConfig,
     ExpectIndex(usize),
+}
+
+#[derive(Debug)]
+struct FolderInfo {
+    label: String,
+    max_remote_seq: i64,
 }
 
 fn hexdump(data: &[u8]) {
