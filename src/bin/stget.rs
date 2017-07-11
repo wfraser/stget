@@ -139,26 +139,30 @@ fn main() {
         }
     }
 
-    if program_state.protocol_state == Some(State::ExpectHello) {
+    if program_state.protocol_state == Some(State::ExpectHello)
+            || program_state.protocol_state == Some(State::ExpectClusterConfig)
+    {
         println!("Remote declined to talk with us.");
-        let (_len, remote_hello): (usize, proto::Hello) =
-        stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
-            println!("error reading remote hello: {}", e);
-            panic!(e);
-        });
-        println!("Remote is {}, running {} {}",
-        remote_hello.device_name,
-        remote_hello.client_name,
-        remote_hello.client_version);
+        if program_state.protocol_state == Some(State::ExpectHello) {
+            let (_len, remote_hello): (usize, proto::Hello) =
+            stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
+                println!("error reading remote hello: {}", e);
+                panic!(e);
+            });
+            println!("Remote is \"{}\", running {} {}",
+                    remote_hello.device_name,
+                    remote_hello.client_name,
+                    remote_hello.client_version);
+        }
     }
 }
 
 fn process_network_data(program: &mut ProgramState, session: &mut stget::session::Session, data: &mut Vec<u8>) {
     match program.protocol_state.take() {
         Some(State::ExpectHello) => {
-            hexdump(&data);
+            hexdump(data);
             let (len, remote_hello): (usize, proto::Hello) =
-                stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
+                stget::session::Session::read_hello(data).unwrap_or_else(|e| {
                     println!("error reading remote hello: {}", e);
                     panic!(e);
                 });
@@ -172,13 +176,21 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             program.protocol_state = Some(State::ExpectClusterConfig);
         },
         Some(State::ExpectClusterConfig) => {
-            hexdump(&data);
-            let (len, remote_cluster_config) = stget::session::Session::read_message::<proto::ClusterConfig>(&data)
+            hexdump(data);
+            let (len, msgtype, message) = stget::session::Session::read_message(data)
                 .unwrap_or_else(|e| {
                     println!("Error reading remote cluster config: {}", e);
                     panic!(e);
                 });
             data.drain(0..len);
+
+            let remote_cluster_config: &proto::ClusterConfig = match msgtype {
+                proto::MessageType::CLUSTER_CONFIG => message.as_any().downcast_ref().unwrap(),
+                other => {
+                    println!("unexpected message type {:?}; wanted CLUSTER_CONFIG", other);
+                    return;
+                }
+            };
 
             debug!("remote cluster config: {:#?}", remote_cluster_config);
 
@@ -262,15 +274,39 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                 program.protocol_state = Some(State::ExpectIndex(index_n));
                 return;
             }
-            //hexdump(&data);
+            //hexdump(data);
 
-            let (len, index) = stget::session::Session::read_message::<proto::Index>(&data)
+            let (len, msgtype, message) = stget::session::Session::read_message(data)
                 .unwrap_or_else(|e| {
-                    println!("Error reading remote index: {}", e);
+                    println!("Error reading remote message: {}", e);
                     panic!(e);
                 });
             debug!("{} bytes read", len);
             data.drain(0..len);
+
+            let index: &proto::Index = match msgtype {
+                proto::MessageType::INDEX => message.as_any().downcast_ref().unwrap(),
+                proto::MessageType::INDEX_UPDATE => unsafe {
+                    // Horrible hack relying on the fact that Index and IndexUpdate are the same
+                    &*(message.as_any().downcast_ref::<proto::IndexUpdate>().unwrap()
+                        as *const proto::IndexUpdate
+                        as *const proto::Index)
+                },
+                proto::MessageType::PING => {
+                    debug!("got a ping message");
+                    program.protocol_state = Some(State::ExpectIndex(index_n));
+                    return;
+                },
+                proto::MessageType::CLOSE => {
+                    let close: &proto::Close = message.as_any().downcast_ref().unwrap();
+                    debug!("got a close message: {:?}", close);
+                    return;
+                },
+                other => {
+                    println!("got an unexpected message type: {:?}", other);
+                    return;
+                }
+            };
 
             debug!("remote index: {:#?}", index);
 

@@ -1,4 +1,5 @@
 use super::{Result, ResultExt};
+use super::SyncthingMessage;
 use super::syncthing_proto;
 use super::util;
 use std::io;
@@ -62,7 +63,8 @@ impl Session {
         Ok((input.pos() as usize, hello))
     }
 
-    pub fn read_message<T: ProtobufMessage + protobuf::MessageStatic>(buf: &[u8]) -> Result<(usize, T)> {
+    pub fn read_message(buf: &[u8])
+            -> Result<(usize, syncthing_proto::MessageType, Box<SyncthingMessage>)> {
         let mut input = protobuf::CodedInputStream::from_bytes(buf);
 
         let header_length = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
@@ -95,12 +97,21 @@ impl Session {
         }
 
         let mut body_input = protobuf::CodedInputStream::from_bytes(&body_protobuf);
-        let mut body = T::new();
-        body.merge_from(&mut body_input)?;
+        let mut body: Box<SyncthingMessage> = match header.get_field_type() {
+            syncthing_proto::MessageType::CLUSTER_CONFIG    => Box::new(syncthing_proto::ClusterConfig::new()),
+            syncthing_proto::MessageType::INDEX             => Box::new(syncthing_proto::Index::new()),
+            syncthing_proto::MessageType::INDEX_UPDATE      => Box::new(syncthing_proto::IndexUpdate::new()),
+            syncthing_proto::MessageType::REQUEST           => unimplemented!("message type REQUEST"),
+            syncthing_proto::MessageType::RESPONSE          => unimplemented!("message type RESPONSE"),
+            syncthing_proto::MessageType::DOWNLOAD_PROGRESS => unimplemented!("message type DOWNLOAD_PROGRESS"),
+            syncthing_proto::MessageType::PING              => Box::new(syncthing_proto::Ping::new()),
+            syncthing_proto::MessageType::CLOSE             => Box::new(syncthing_proto::Close::new()),
+        };
+        body.as_mut().as_protobuf_message().merge_from(&mut body_input)?;
 
         debug!("body_input pos: {}", body_input.pos());
 
-        Ok((input.pos() as usize, body))
+        Ok((input.pos() as usize, header.get_field_type(), body))
     }
 
     pub fn write_message<T: ProtobufMessage + protobuf::MessageStatic>(

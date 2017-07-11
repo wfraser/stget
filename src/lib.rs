@@ -27,3 +27,26 @@ pub mod syncthing_proto;
 pub mod util;
 
 pub use certificate::{Certificate, PrivateKey};
+
+pub trait SyncthingMessage {
+    fn as_any(&self) -> &std::any::Any;
+    fn as_protobuf_message(&mut self) -> &mut protobuf::Message;
+}
+
+macro_rules! impl_syncthing_message {
+    ($type:path) => {
+        impl SyncthingMessage for $type {
+            fn as_any(&self) -> &std::any::Any { self }
+            fn as_protobuf_message(&mut self) -> &mut protobuf::Message { self }
+        }
+    }
+}
+
+impl_syncthing_message!(syncthing_proto::ClusterConfig);
+impl_syncthing_message!(syncthing_proto::Index);
+impl_syncthing_message!(syncthing_proto::IndexUpdate);
+impl_syncthing_message!(syncthing_proto::Request);
+impl_syncthing_message!(syncthing_proto::Response);
+impl_syncthing_message!(syncthing_proto::DownloadProgress);
+impl_syncthing_message!(syncthing_proto::Ping);
+impl_syncthing_message!(syncthing_proto::Close);
