@@ -103,8 +103,11 @@ fn main() {
     let mut program_state = ProgramState {
         remote_cert_hash,
         folders_by_id: HashMap::new(),
-        list_mode: args.is_present("list"),
-        path: args.value_of("path").map(|s| s.to_owned()),
+        mode: if args.is_present("list") {
+            Mode::List
+        } else {
+            Mode::Fetch(args.value_of("path").unwrap().to_owned())
+        },
         protocol_state: Some(State::ExpectHello),
         file_info: None,
     };
@@ -177,7 +180,6 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
         },
         Some(State::ExpectIndex(index_n)) => {
             eprintln!("got index {}", index_n);
-            //hexdump(data);
             program.handle_index(data, index_n, session);
         }
         Some(State::ExpectBlocks(blocks)) => {
@@ -192,10 +194,15 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
 struct ProgramState {
     remote_cert_hash: Vec<u8>,
     folders_by_id: HashMap<String, FolderInfo>,
-    list_mode: bool,
-    path: Option<String>,
+    mode: Mode,
     file_info: Option<proto::FileInfo>,
     protocol_state: Option<State>,
+}
+
+#[derive(Debug)]
+enum Mode {
+    List,
+    Fetch(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -272,46 +279,48 @@ impl ProgramState {
             }
         }
 
-        if self.list_mode {
-            // make a cluster config with all the folders in the remote
-            for remote_folder in remote_cluster_config.get_folders() {
+        match self.mode {
+            Mode::List => {
+                // make a cluster config with all the folders in the remote
+                for remote_folder in remote_cluster_config.get_folders() {
+                    let mut folder = proto::Folder::new();
+                    folder.set_id(remote_folder.get_id().to_owned());
+                    folder.set_label(remote_folder.get_label().to_owned());
+                    folder.set_read_only(true);
+                    folder.set_ignore_permissions(true);
+                    folder.set_ignore_delete(true);
+                    folder.set_disable_temp_indexes(true);
+                    cluster_config.mut_folders().push(folder);
+                }
+            },
+            Mode::Fetch(ref path) => {
+                let folder_name = path.splitn(2, '/').next().unwrap();
+
+                let mut folder_id = None;
+                for folder in remote_cluster_config.get_folders() {
+                    if folder.get_label() == folder_name {
+                        folder_id = Some(folder.get_id());
+                        break;
+                    }
+                }
+                if folder_id.is_none() {
+                    eprintln!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
+                    eprintln!("it offered:");
+                    for folder in remote_cluster_config.get_folders() {
+                        eprintln!("    {} ({})", folder.get_label(), folder.get_id());
+                    }
+                    std::process::exit(1);
+                }
+
                 let mut folder = proto::Folder::new();
-                folder.set_id(remote_folder.get_id().to_owned());
-                folder.set_label(remote_folder.get_label().to_owned());
+                folder.set_id(folder_id.unwrap().to_owned());
+                folder.set_label(folder_name.to_owned());
                 folder.set_read_only(true);
                 folder.set_ignore_permissions(true);
                 folder.set_ignore_delete(true);
                 folder.set_disable_temp_indexes(true);
                 cluster_config.mut_folders().push(folder);
             }
-        } else {
-            let folder_name = self.path.as_ref().unwrap()
-                .splitn(2, '/').next().unwrap();
-
-            let mut folder_id = None;
-            for folder in remote_cluster_config.get_folders() {
-                if folder.get_label() == folder_name {
-                    folder_id = Some(folder.get_id());
-                    break;
-                }
-            }
-            if folder_id.is_none() {
-                eprintln!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
-                eprintln!("it offered:");
-                for folder in remote_cluster_config.get_folders() {
-                    eprintln!("    {} ({})", folder.get_label(), folder.get_id());
-                }
-                std::process::exit(1);
-            }
-
-            let mut folder = proto::Folder::new();
-            folder.set_id(folder_id.unwrap().to_owned());
-            folder.set_label(folder_name.to_owned());
-            folder.set_read_only(true);
-            folder.set_ignore_permissions(true);
-            folder.set_ignore_delete(true);
-            folder.set_disable_temp_indexes(true);
-            cluster_config.mut_folders().push(folder);
         }
 
         debug!("sending cluster config");
@@ -388,12 +397,16 @@ impl ProgramState {
             }
 
             let path = format!("{}/{}", folder_info.label, file.get_name());
-            if self.list_mode {
-                println!("{}", path);
-            } else if &path == self.path.as_ref().unwrap() {
-                debug!("found the file");
-                assert_eq!(None, self.file_info);
-                self.file_info = Some(file.clone());
+            match self.mode {
+                Mode::List => {
+                    println!("{}", path);
+                }
+                Mode::Fetch(ref check_path) if check_path == &path => {
+                    debug!("found the file");
+                    assert_eq!(None, self.file_info);
+                    self.file_info = Some(file.clone());
+                }
+                _ => ()
             }
         }
 
@@ -404,7 +417,13 @@ impl ProgramState {
             // sequence number.
             debug!("got last index update for this folder");
             debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
-            if self.path.is_some() || index_n + 1 == self.folders_by_id.len() {
+
+            let done = match self.mode {
+                Mode::Fetch(_) => true, // we only asked for one folder, not all of them
+                Mode::List => index_n + 1 == self.folders_by_id.len()
+            };
+
+            if done {
                 debug!("at last folder; ending");
                 eprintln!("File info: {:#?}", self.file_info);
 
@@ -434,11 +453,9 @@ impl ProgramState {
                     }
 
                     self.protocol_state = Some(State::ExpectBlocks(blocks));
-                } else if self.list_mode {
+                } else {
                     // all done :)
                     self.protocol_state = None;
-                } else {
-                    panic!("missing file info");
                 }
             } else {
                 self.protocol_state = Some(State::ExpectIndex(index_n + 1));
