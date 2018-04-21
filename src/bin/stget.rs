@@ -57,6 +57,11 @@ fn main() {
     };
 
     let device_id = args.value_of("device_id").unwrap();
+    if device_id.len() != 63 {
+        eprintln!("Device ID should be 63 characters long, not {}", device_id.len());
+        std::process::exit(1);
+    }
+
     let remote_cert_hash = stget::util::hash_from_device_id(device_id);
 
     /*
@@ -75,13 +80,13 @@ fn main() {
     let key_path = base_path.join("cert").join("private.pem");
 
     let cert = stget::certificate::read_cert_file_pem(&cert_path).unwrap_or_else(|e| {
-        println!("Unable to load certificate {:?}: {}", cert_path, e);
-        println!("Did you remember to generate a client certificate?");
+        eprintln!("Unable to load certificate {:?}: {}", cert_path, e);
+        eprintln!("Did you remember to generate a client certificate?");
         std::process::exit(1);
     });
     let key = stget::certificate::read_key_file_pem(&key_path).unwrap_or_else(|e| {
-        println!("Unable to load private key {:?}: {}", key_path, e);
-        println!("Did you remember to generate a client certificate?");
+        eprintln!("Unable to load private key {:?}: {}", key_path, e);
+        eprintln!("Did you remember to generate a client certificate?");
         std::process::exit(1);
     });
 
@@ -101,6 +106,7 @@ fn main() {
         list_mode: args.is_present("list"),
         path: args.value_of("path").map(|s| s.to_owned()),
         protocol_state: Some(State::ExpectHello),
+        file_info: None,
     };
 
     let mut data = vec![];
@@ -113,7 +119,7 @@ fn main() {
         match session.read_to_end(&mut data) {
             Err(stget::Error(stget::ErrorKind::Io(ref e), _))
                     if e.kind() == std::io::ErrorKind::ConnectionAborted => {
-                println!("connection closed");
+                eprintln!("connection closed");
                 break;
             },
             Err(e) => {
@@ -124,7 +130,7 @@ fn main() {
                 debug!("read {}", n);
                 /*
                 if w == 0 && n == r {
-                    println!("done");
+                    eprintln!("done");
                     break;
                 }
                 */
@@ -142,14 +148,14 @@ fn main() {
     if program_state.protocol_state == Some(State::ExpectHello)
             || program_state.protocol_state == Some(State::ExpectClusterConfig)
     {
-        println!("Remote declined to talk with us.");
+        eprintln!("Remote declined to talk with us.");
         if program_state.protocol_state == Some(State::ExpectHello) {
             let (_len, remote_hello): (usize, proto::Hello) =
             stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
-                println!("error reading remote hello: {}", e);
+                eprintln!("error reading remote hello: {}", e);
                 panic!(e);
             });
-            println!("Remote is \"{}\", running {} {}",
+            eprintln!("Remote is \"{}\", running {} {}",
                     remote_hello.device_name,
                     remote_hello.client_name,
                     remote_hello.client_version);
@@ -163,10 +169,10 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             hexdump(data);
             let (len, remote_hello): (usize, proto::Hello) =
                 stget::session::Session::read_hello(data).unwrap_or_else(|e| {
-                    println!("error reading remote hello: {}", e);
+                    eprintln!("error reading remote hello: {}", e);
                     panic!(e);
                 });
-            println!("Remote is \"{}\", running {} {}",
+            eprintln!("Remote is \"{}\", running {} {}",
                     remote_hello.device_name,
                     remote_hello.client_name,
                     remote_hello.client_version);
@@ -179,7 +185,7 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             hexdump(data);
             let (len, msgtype, message) = stget::session::Session::read_message(data)
                 .unwrap_or_else(|e| {
-                    println!("Error reading remote cluster config: {}", e);
+                    eprintln!("Error reading remote cluster config: {}", e);
                     panic!(e);
                 });
             data.drain(0..len);
@@ -187,7 +193,7 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             let remote_cluster_config: &proto::ClusterConfig = match msgtype {
                 proto::MessageType::CLUSTER_CONFIG => message.as_any().downcast_ref().unwrap(),
                 other => {
-                    println!("unexpected message type {:?}; wanted CLUSTER_CONFIG", other);
+                    eprintln!("unexpected message type {:?}; wanted CLUSTER_CONFIG", other);
                     return;
                 }
             };
@@ -200,12 +206,12 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                 for device in folder.get_devices() {
                     let device_cert_hash: &[u8] = device.get_id();
                     if device_cert_hash == program.remote_cert_hash.as_slice() {
-                    program.folders_by_id.insert(
-                        folder.get_id().to_owned(),
-                        FolderInfo {
-                            label: folder.get_label().to_owned(),
-                            max_remote_seq: device.get_max_sequence(),
-                        });
+                        program.folders_by_id.insert(
+                            folder.get_id().to_owned(),
+                            FolderInfo {
+                                label: folder.get_label().to_owned(),
+                                max_remote_seq: device.get_max_sequence(),
+                            });
                     }
                 }
             }
@@ -234,10 +240,10 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                     }
                 }
                 if folder_id.is_none() {
-                    println!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
-                    println!("it offered:");
+                    eprintln!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
+                    eprintln!("it offered:");
                     for folder in remote_cluster_config.get_folders() {
-                        println!("    {} ({})", folder.get_label(), folder.get_id());
+                        eprintln!("    {} ({})", folder.get_label(), folder.get_id());
                     }
                     std::process::exit(1);
                 }
@@ -257,7 +263,7 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                     cluster_config,
                     proto::MessageType::CLUSTER_CONFIG)
                 .unwrap_or_else(|e| {
-                    println!("error sending our cluster config: {}", e);
+                    eprintln!("error sending our cluster config: {}", e);
                     panic!(e);
                 });
 
@@ -278,7 +284,7 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
 
             let (len, msgtype, message) = stget::session::Session::read_message(data)
                 .unwrap_or_else(|e| {
-                    println!("Error reading remote message: {}", e);
+                    eprintln!("Error reading remote message: {}", e);
                     panic!(e);
                 });
             debug!("{} bytes read", len);
@@ -303,7 +309,7 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                     return;
                 },
                 other => {
-                    println!("got an unexpected message type: {:?}", other);
+                    eprintln!("got an unexpected message type: {:?}", other);
                     return;
                 }
             };
@@ -313,17 +319,20 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             let folder_info = &program.folders_by_id[index.get_folder()];
             let files = index.get_files();
 
-            if program.list_mode {
-                for file in files {
-                    if file.get_field_type() == proto::FileInfoType::DIRECTORY
-                            || file.get_deleted()
-                    {
-                        continue;
-                    }
-                    println!("{}/{}", folder_info.label, file.get_name());
+            for file in files {
+                if file.get_field_type() == proto::FileInfoType::DIRECTORY
+                        || file.get_deleted() {
+                    continue;
                 }
-            } else {
-                unimplemented!("fetching a file not yet implemented");
+
+                let path = format!("{}/{}", folder_info.label, file.get_name());
+                if program.list_mode {
+                    println!("{}", path);
+                } else if &path == program.path.as_ref().unwrap() {
+                    debug!("found the file");
+                    assert_eq!(None, program.file_info);
+                    program.file_info = Some(file.clone());
+                }
             }
 
             if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
@@ -332,15 +341,28 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
                 // It also assumes that the files in each message are sorted by
                 // sequence number.
                 debug!("got last index update for this folder");
-                if index_n + 1 == program.folders_by_id.len() {
+                debug!("index_n = {}; folders_by_id = {}", index_n, program.folders_by_id.len());
+                if program.path.is_some() || index_n + 1 == program.folders_by_id.len() {
                     debug!("at last folder; ending");
-                    return;
+                    eprintln!("File info: {:#?}", program.file_info);
+
+                    // TODO: write a request for the first block (maybe all the blocks?)
+                    // and fill in the vector for the ExpectBlocks state
+
+                    // let request_id = session.write_block_request(folder, path, offset, size,
+                    //      hash)?;
+
+                    program.protocol_state = Some(State::ExpectBlocks(vec![]));
+                    unimplemented!("requesting blocks");
                 } else {
                     program.protocol_state = Some(State::ExpectIndex(index_n + 1));
                 }
             } else {
                 program.protocol_state = Some(State::ExpectIndex(index_n));
             }
+        }
+        Some(State::ExpectBlocks(_blocks)) => {
+            unimplemented!("requesting blocks");
         }
         None => panic!("bad state"),
     }
@@ -352,14 +374,22 @@ struct ProgramState {
     folders_by_id: HashMap<String, FolderInfo>,
     list_mode: bool,
     path: Option<String>,
+    file_info: Option<proto::FileInfo>,
     protocol_state: Option<State>,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 enum State {
     ExpectHello,
     ExpectClusterConfig,
     ExpectIndex(usize),
+    ExpectBlocks(Vec<Block>), // maybe a map keyed on request_id would be better?
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum Block {
+    Outstanding(i32), // request ID
+    Data(Vec<u8>),
 }
 
 #[derive(Debug)]

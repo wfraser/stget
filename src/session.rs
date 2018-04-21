@@ -19,6 +19,7 @@ pub struct Session {
     tls: rustls::ClientSession,
     stream: TcpStream,
     device_name: String,
+    next_request_id: i32,
 }
 
 impl Session {
@@ -102,7 +103,7 @@ impl Session {
             syncthing_proto::MessageType::INDEX             => Box::new(syncthing_proto::Index::new()),
             syncthing_proto::MessageType::INDEX_UPDATE      => Box::new(syncthing_proto::IndexUpdate::new()),
             syncthing_proto::MessageType::REQUEST           => unimplemented!("message type REQUEST"),
-            syncthing_proto::MessageType::RESPONSE          => unimplemented!("message type RESPONSE"),
+            syncthing_proto::MessageType::RESPONSE          => Box::new(syncthing_proto::Response::new()),
             syncthing_proto::MessageType::DOWNLOAD_PROGRESS => unimplemented!("message type DOWNLOAD_PROGRESS"),
             syncthing_proto::MessageType::PING              => Box::new(syncthing_proto::Ping::new()),
             syncthing_proto::MessageType::CLOSE             => Box::new(syncthing_proto::Close::new()),
@@ -138,6 +139,31 @@ impl Session {
 
         output.flush()?;
         Ok(())
+    }
+
+    pub fn write_block_request(
+        &mut self,
+        folder: String,
+        path: String,
+        offset: i64,
+        size: i32,
+        hash: Vec<u8>,
+        ) -> Result<i32> // returns the request ID
+    {
+        let request_id = self.next_request_id;
+        self.next_request_id += 1;
+
+        let mut req = syncthing_proto::Request::new();
+        req.set_id(request_id);
+        req.set_folder(folder);
+        req.set_name(path);
+        req.set_offset(offset);
+        req.set_size(size);
+        req.set_hash(hash);
+        req.set_from_temporary(false);
+
+        self.write_message(req, syncthing_proto::MessageType::REQUEST)?;
+        Ok(request_id)
     }
 
     // FIXME(wfraser) only for testing
@@ -268,6 +294,7 @@ impl SessionBuilder {
             tls: rustls::ClientSession::new(&Arc::new(config), "syncthing"),
             stream: stream,
             device_name: device_name,
+            next_request_id: 0,
         })
     }
 }
