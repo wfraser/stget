@@ -5,6 +5,7 @@ extern crate clap;
 extern crate env_logger;
 #[macro_use] extern crate error_chain;
 #[macro_use] extern crate log;
+extern crate protobuf;
 extern crate stget;
 
 use std::collections::HashMap;
@@ -109,7 +110,6 @@ fn main() {
             Mode::Fetch(args.value_of("path").unwrap().to_owned())
         },
         protocol_state: Some(State::ExpectHello),
-        file_info: None,
     };
 
     let mut data = vec![];
@@ -182,9 +182,9 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             eprintln!("got index {}", index_n);
             program.handle_index(data, index_n, session);
         }
-        Some(State::ExpectBlocks(blocks)) => {
+        Some(State::FetchBlocks(fetch_state)) => {
             eprintln!("got block response");
-            program.handle_response(data, blocks);
+            program.handle_response(data, fetch_state, session);
         }
         None => panic!("bad state"),
     }
@@ -195,7 +195,6 @@ struct ProgramState {
     remote_cert_hash: Vec<u8>,
     folders_by_id: HashMap<String, FolderInfo>,
     mode: Mode,
-    file_info: Option<proto::FileInfo>,
     protocol_state: Option<State>,
 }
 
@@ -210,19 +209,23 @@ enum State {
     ExpectHello,
     ExpectClusterConfig,
     ExpectIndex(usize),
-    ExpectBlocks(Vec<Block>), // maybe a map keyed on request_id would be better?
-}
-
-#[derive(Debug, Clone, PartialEq)]
-enum Block {
-    Outstanding(usize), // index into the block list
-    Data(Vec<u8>),
+    FetchBlocks(BlockFetchState),
 }
 
 #[derive(Debug)]
 struct FolderInfo {
     label: String,
     max_remote_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct BlockFetchState {
+    file_data: Vec<u8>,
+    file_size: u64,
+    folder_id: String,
+    path: String,
+    block_info: Vec<proto::BlockInfo>,
+    current_outstanding: usize,
 }
 
 impl ProgramState {
@@ -403,8 +406,32 @@ impl ProgramState {
                 }
                 Mode::Fetch(ref check_path) if check_path == &path => {
                     debug!("found the file");
-                    assert_eq!(None, self.file_info);
-                    self.file_info = Some(file.clone());
+
+                    // request the first block and do a state transition
+
+                    let fetch_state = BlockFetchState {
+                        // 32-bit targets gonna have a bad time here
+                        file_data: Vec::with_capacity(file.size as usize),
+                        file_size: file.size as u64,
+                        folder_id: index.folder.clone(),
+                        path: file.get_name().to_owned(),
+                        block_info: file.get_Blocks().to_owned(),
+                        current_outstanding: 0,
+                    };
+
+                    session.write_block_request(
+                        fetch_state.folder_id.clone(),
+                        fetch_state.path.clone(),
+                        fetch_state.block_info[0].offset,
+                        fetch_state.block_info[0].size,
+                        fetch_state.block_info[0].hash.clone(),
+                    ).unwrap_or_else(|e| {
+                        eprintln!("Error sending block request: {}", e);
+                        panic!(e);
+                    });
+
+                    self.protocol_state = Some(State::FetchBlocks(fetch_state));
+                    return;
                 }
                 _ => ()
             }
@@ -418,45 +445,9 @@ impl ProgramState {
             debug!("got last index update for this folder");
             debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
 
-            let done = match self.mode {
-                Mode::Fetch(_) => true, // we only asked for one folder, not all of them
-                Mode::List => index_n + 1 == self.folders_by_id.len()
-            };
-
-            if done {
-                debug!("at last folder; ending");
-                eprintln!("File info: {:#?}", self.file_info);
-
-                let mut blocks = vec![];
-                if let Some(ref file_info) = self.file_info {
-
-                    let path = file_info.name.clone();
-                    eprintln!("folder: {:?} {:?}", index.folder, folder_info.label);
-                    eprintln!("path: {:?}", path);
-
-                    for (idx, block_info) in file_info.get_Blocks().iter().enumerate() {
-                        debug!("requesting block {}", idx);
-                        let req_id = session.write_block_request(
-                            index.folder.clone(),
-                            path.clone(),
-                            block_info.offset,
-                            block_info.size,
-                            block_info.hash.clone(),
-                        ).unwrap_or_else(|e| {
-                            eprintln!("Error sending block request: {}", e);
-                            panic!(e);
-                        });
-
-                        assert_eq!(req_id as usize, idx);
-
-                        blocks.push(Block::Outstanding(idx));
-                    }
-
-                    self.protocol_state = Some(State::ExpectBlocks(blocks));
-                } else {
-                    // all done :)
-                    self.protocol_state = None;
-                }
+            if index_n + 1 == self.folders_by_id.len() {
+                // all done :)
+                self.protocol_state = None;
             } else {
                 self.protocol_state = Some(State::ExpectIndex(index_n + 1));
             }
@@ -465,12 +456,30 @@ impl ProgramState {
         }
     }
 
-    pub fn handle_response(&mut self, data: &mut Vec<u8>, mut blocks: Vec<Block>) {
-        let (len, msgtype, mut message) = stget::session::Session::read_message(data)
-            .unwrap_or_else(|e| {
+    pub fn handle_response(
+        &mut self,
+        data: &mut Vec<u8>,
+        mut fetch_state: BlockFetchState,
+        session: &mut stget::session::Session,
+    ) {
+        let (len, msgtype, mut message) = match stget::session::Session::read_message(data) {
+            Ok(stuff) => stuff,
+            //Err(::protobuf::error::WireError::UnexpectedEof) => {
+            //Err(stget::Error(stget::ErrorKind::ProtoBuf(protobuf::error::WireError::UnexpectedEof), _)) => {
+            Err(stget::Error(
+                stget::ErrorKind::ProtoBuf(
+                    protobuf::ProtobufError::WireError(
+                        protobuf::error::WireError::UnexpectedEof)),
+                _)) => {
+                debug!("need to read more");
+                self.protocol_state = Some(State::FetchBlocks(fetch_state));
+                return;
+            }
+            Err(e) => {
                 eprintln!("Error reading block response: {}", e);
                 panic!(e);
-            });
+            }
+        };
         data.drain(0..len);
 
         let response: &mut proto::Response = match msgtype {
@@ -483,31 +492,30 @@ impl ProgramState {
 
         debug!("request {} response: {:#?}", response.id, response);
 
-        let idx = response.id as usize;
-        blocks[idx] = Block::Data(response.take_data());
+        fetch_state.file_data.append(&mut response.take_data());
 
-        if blocks.iter().any(|it| std::mem::discriminant(it) == std::mem::discriminant(&Block::Outstanding(0))) {
-            self.protocol_state = Some(State::ExpectBlocks(blocks));
-        } else {
-            // reassemble the blocks
+        if fetch_state.current_outstanding == fetch_state.block_info.len() - 1 {
+            assert_eq!(fetch_state.file_size as usize, fetch_state.file_data.len());
+            std::io::Write::write_all(&mut std::io::stdout(), &fetch_state.file_data)
+                .expect("write error");
             self.protocol_state = None;
-
-            let file_info = self.file_info.as_ref().unwrap();
-
-            // 32-bit targets gonna have a bad time here
-            let mut file = Vec::with_capacity(file_info.size as usize);
-
-            for block in blocks {
-                let mut block = match block {
-                    Block::Data(data) => data,
-                    _ => panic!()
-                };
-                file.append(&mut block);
-            }
-
-            assert_eq!(file_info.size as usize, file.len());
-            std::io::Write::write_all(&mut std::io::stdout(), &file).expect("write error");
+            return;
         }
+
+        let idx = fetch_state.current_outstanding + 1;
+        fetch_state.current_outstanding += 1;
+        session.write_block_request(
+            fetch_state.folder_id.clone(),
+            fetch_state.path.clone(),
+            fetch_state.block_info[idx].offset,
+            fetch_state.block_info[idx].size,
+            fetch_state.block_info[idx].hash.clone()
+        ).unwrap_or_else(|e| {
+            eprintln!("Error sending block request: {}", e);
+            panic!(e);
+        });
+
+        self.protocol_state = Some(State::FetchBlocks(fetch_state));
     }
 }
 

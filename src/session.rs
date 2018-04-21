@@ -153,6 +153,12 @@ impl Session {
         let request_id = self.next_request_id;
         self.next_request_id += 1;
 
+        debug!("sending block request {}:", request_id);
+        debug!("    folder: {:?}", folder);
+        debug!("    path: {:?}", path);
+        debug!("    offset: {:?}", offset);
+        debug!("    size: {:?}", size);
+
         let mut req = syncthing_proto::Request::new();
         req.set_id(request_id);
         req.set_folder(folder);
