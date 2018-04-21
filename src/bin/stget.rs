@@ -169,21 +169,19 @@ fn main() {
 fn process_network_data(program: &mut ProgramState, session: &mut stget::session::Session, data: &mut Vec<u8>) {
     match program.protocol_state.take() {
         Some(State::ExpectHello) => {
-            eprintln!("got hello");
-            hexdump(data);
+            debug!("got hello");
             program.handle_hello(data);
         },
         Some(State::ExpectClusterConfig) => {
-            eprintln!("got remote cluster config");
-            hexdump(data);
+            debug!("got remote cluster config");
             program.handle_cluster_config(data, session);
         },
         Some(State::ExpectIndex(index_n)) => {
-            eprintln!("got index {}", index_n);
+            debug!("got index {}", index_n);
             program.handle_index(data, index_n, session);
         }
         Some(State::FetchBlocks(fetch_state)) => {
-            eprintln!("got block response");
+            debug!("got block response");
             program.handle_response(data, fetch_state, session);
         }
         None => panic!("bad state"),
@@ -335,6 +333,7 @@ impl ProgramState {
                 panic!(e);
             });
 
+        eprintln!("receiving folder index");
         self.protocol_state = Some(State::ExpectIndex(0));
     }
 
@@ -406,6 +405,7 @@ impl ProgramState {
                 }
                 Mode::Fetch(ref check_path) if check_path == &path => {
                     debug!("found the file");
+                    eprintln!("requesting the file");
 
                     // request the first block and do a state transition
 
@@ -445,7 +445,10 @@ impl ProgramState {
             debug!("got last index update for this folder");
             debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
 
-            if index_n + 1 == self.folders_by_id.len() {
+            if let Mode::Fetch(_) = self.mode {
+                eprintln!("No matching file was found in the directory index.");
+                self.protocol_state = None;
+            } else if index_n + 1 == self.folders_by_id.len() {
                 // all done :)
                 self.protocol_state = None;
             } else {
@@ -464,14 +467,12 @@ impl ProgramState {
     ) {
         let (len, msgtype, mut message) = match stget::session::Session::read_message(data) {
             Ok(stuff) => stuff,
-            //Err(::protobuf::error::WireError::UnexpectedEof) => {
-            //Err(stget::Error(stget::ErrorKind::ProtoBuf(protobuf::error::WireError::UnexpectedEof), _)) => {
             Err(stget::Error(
                 stget::ErrorKind::ProtoBuf(
                     protobuf::ProtobufError::WireError(
                         protobuf::error::WireError::UnexpectedEof)),
                 _)) => {
-                debug!("need to read more");
+                debug!("we have {:#x} bytes, but need to read more", data.len());
                 self.protocol_state = Some(State::FetchBlocks(fetch_state));
                 return;
             }
@@ -490,12 +491,31 @@ impl ProgramState {
             }
         };
 
-        debug!("request {} response: {:#?}", response.id, response);
+        debug!("got request {} response", response.id);
+        match response.code {
+            proto::ErrorCode::NO_ERROR => (),
+            proto::ErrorCode::GENERIC => {
+                eprintln!("Error: remote host says there is some unspecified error");
+                self.protocol_state = None;
+                return;
+            }
+            proto::ErrorCode::NO_SUCH_FILE => {
+                eprintln!("Error: remote host says there is no such file");
+                self.protocol_state = None;
+                return;
+            }
+            proto::ErrorCode::INVALID_FILE => {
+                eprintln!("Error: remote host says invalid file");
+                self.protocol_state = None;
+                return;
+            }
+        }
 
         fetch_state.file_data.append(&mut response.take_data());
 
         if fetch_state.current_outstanding == fetch_state.block_info.len() - 1 {
             assert_eq!(fetch_state.file_size as usize, fetch_state.file_data.len());
+            eprintln!("fetched {} bytes", fetch_state.file_size);
             std::io::Write::write_all(&mut std::io::stdout(), &fetch_state.file_data)
                 .expect("write error");
             self.protocol_state = None;
@@ -519,6 +539,7 @@ impl ProgramState {
     }
 }
 
+#[allow(dead_code)]
 fn hexdump(data: &[u8]) {
     for i in 0 .. ((data.len() / 16) + 1) {
         eprint!("{:04x}  ", i * 16);
