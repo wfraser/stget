@@ -101,7 +101,7 @@ fn main() {
     session.write_hello().unwrap();
 
     let mut program_state = ProgramState {
-        remote_cert_hash: remote_cert_hash,
+        remote_cert_hash,
         folders_by_id: HashMap::new(),
         list_mode: args.is_present("list"),
         path: args.value_of("path").map(|s| s.to_owned()),
@@ -315,7 +315,7 @@ impl ProgramState {
 
         debug!("sending cluster config");
         session.write_message(
-                cluster_config,
+                &cluster_config,
                 proto::MessageType::CLUSTER_CONFIG)
             .unwrap_or_else(|e| {
                 eprintln!("error sending our cluster config: {}", e);

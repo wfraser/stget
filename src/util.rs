@@ -66,7 +66,7 @@ fn test_reverse_device_id() {
 /// This is similar to Luhn mod 32, except with some bugs that are in the Syncthing implementation:
 /// the initial factor is 1 instead of 2, and it reads the input forwards instead of in reverse.
 fn syncthing_luhn(group: &str) -> char {
-    const ALPHABET: &'static [u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
     let mut factor = 1;
     let mut sum = 0;

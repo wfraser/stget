@@ -13,7 +13,7 @@ use protobuf::Message as ProtobufMessage;
 use ring;
 use rustls;
 
-const HELLO_MAGIC: u32 = 0x2ea7d90b;
+const HELLO_MAGIC: u32 = 0x2ea7_d90b;
 
 pub struct Session {
     tls: rustls::ClientSession,
@@ -54,7 +54,7 @@ impl Session {
         }
 
         let len = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
-        input.push_limit(len as u64)?;
+        input.push_limit(u64::from(len))?;
         debug!("hello message length specified as {:#x}; we have {:#x} bytes",
                 len, buf.len() as u64 - input.pos());
 
@@ -70,7 +70,7 @@ impl Session {
 
         let header_length = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
         let mut header = syncthing_proto::Header::new();
-        let old_limit = input.push_limit(header_length as u64)?;
+        let old_limit = input.push_limit(u64::from(header_length))?;
         header.merge_from(&mut input).chain_err(|| "error reading message header")?;
         input.pop_limit(old_limit);
 
@@ -117,7 +117,7 @@ impl Session {
 
     pub fn write_message<T: ProtobufMessage + protobuf::MessageStatic>(
         &mut self,
-        message: T,
+        message: &T,
         message_type: syncthing_proto::MessageType,
         ) -> Result<()>
     {
@@ -162,7 +162,7 @@ impl Session {
         req.set_hash(hash);
         req.set_from_temporary(false);
 
-        self.write_message(req, syncthing_proto::MessageType::REQUEST)?;
+        self.write_message(&req, syncthing_proto::MessageType::REQUEST)?;
         Ok(request_id)
     }
 
@@ -292,8 +292,8 @@ impl SessionBuilder {
 
         Ok(Session {
             tls: rustls::ClientSession::new(&Arc::new(config), "syncthing"),
-            stream: stream,
-            device_name: device_name,
+            stream,
+            device_name,
             next_request_id: 0,
         })
     }
@@ -306,7 +306,7 @@ struct SyncthingCertVerifier {
 impl SyncthingCertVerifier {
     pub fn new(device_id: String) -> SyncthingCertVerifier {
         SyncthingCertVerifier {
-            device_id: device_id,
+            device_id,
         }
     }
 }
