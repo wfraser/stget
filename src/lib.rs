@@ -30,6 +30,7 @@ pub use certificate::{Certificate, PrivateKey};
 
 pub trait SyncthingMessage {
     fn as_any(&self) -> &std::any::Any;
+    fn as_any_mut(&mut self) -> &mut std::any::Any;
     fn as_protobuf_message(&mut self) -> &mut protobuf::Message;
 }
 
@@ -37,6 +38,7 @@ macro_rules! impl_syncthing_message {
     ($type:path) => {
         impl SyncthingMessage for $type {
             fn as_any(&self) -> &std::any::Any { self }
+            fn as_any_mut(&mut self) -> &mut std::any::Any { self }
             fn as_protobuf_message(&mut self) -> &mut protobuf::Message { self }
         }
     }
