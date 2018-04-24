@@ -19,4 +19,6 @@ webpki = "0.18.0-alpha"
 
 [dependencies.rustls]
 version = "0.12"
+# This feature is needed because we implement our own certificate validation instead of relying on
+# any certificate root or web PKI:
 features = ["dangerous_configuration"]

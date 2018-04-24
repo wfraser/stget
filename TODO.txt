@@ -1,4 +1,0 @@
-* is there a way to avoid reading the whole index for a list operation?
-* implement file fetching
-    * maybe we can avoid reading the index and just skip straight to sending Request?
-* make certificate generation not depend on a shell script that calls openssl
