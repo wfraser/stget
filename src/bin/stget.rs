@@ -227,12 +227,12 @@ struct IndexRecvState {
 
 #[derive(Debug, Clone, PartialEq)]
 struct BlockFetchState {
-    file_data: Vec<u8>,
     file_size: u64,
     folder_id: String,
     path: String,
     block_info: Vec<proto::BlockInfo>,
     current_outstanding: usize,
+    read_bytes: u64,
 }
 
 impl<'a> ProgramState {
@@ -456,16 +456,13 @@ impl<'a> ProgramState {
                     debug!("found the file");
                     eprintln!("requesting the file");
 
-                    // request the first block and do a state transition
-
                     let state = BlockFetchState {
-                        // 32-bit targets gonna have a bad time here
-                        file_data: Vec::with_capacity(file.size as usize),
                         file_size: file.size as u64,
                         folder_id: index.folder.clone(),
                         path: file.get_name().to_owned(),
                         block_info: file.get_Blocks().to_owned(),
                         current_outstanding: 0,
+                        read_bytes: 0,
                     };
 
                     session.write_block_request(
@@ -510,11 +507,14 @@ impl<'a> ProgramState {
         session: &mut stget::session::Session,
         fetch_state: &mut BlockFetchState,
     ) -> Option<State> {
+
+        fetch_state.read_bytes += response.data.len() as u64;
         eprintln!("received block {} / {} -- {} / {} bytes",
                   response.id + 1,
                   fetch_state.block_info.len(),
-                  fetch_state.file_data.len() + response.data.len(),
+                  fetch_state.read_bytes,
                   fetch_state.file_size);
+
         match response.code {
             proto::ErrorCode::NO_ERROR => (),
             proto::ErrorCode::GENERIC => {
@@ -531,13 +531,12 @@ impl<'a> ProgramState {
             }
         }
 
-        fetch_state.file_data.append(&mut response.take_data());
+        std::io::Write::write_all(&mut std::io::stdout(), &response.data)
+            .expect("write error");
 
         if fetch_state.current_outstanding == fetch_state.block_info.len() - 1 {
-            assert_eq!(fetch_state.file_size as usize, fetch_state.file_data.len());
+            assert_eq!(fetch_state.file_size, fetch_state.read_bytes);
             eprintln!("fetched {} bytes", fetch_state.file_size);
-            std::io::Write::write_all(&mut std::io::stdout(), &fetch_state.file_data)
-                .expect("write error");
             return Some(State::Done);
         }
 
