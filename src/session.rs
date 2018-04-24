@@ -264,6 +264,14 @@ impl Session {
     }
 }
 
+impl ::std::fmt::Debug for Session {
+    fn fmt(&self, fmt: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+        let mut s = fmt.debug_struct("stget::session::Session");
+        s.field("device_name", &self.device_name);
+        s.finish()
+    }
+}
+
 pub struct SessionBuilder {
     pub remote_host_and_port: String,
     pub remote_device_id: String,

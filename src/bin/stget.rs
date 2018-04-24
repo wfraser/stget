@@ -139,9 +139,14 @@ fn main() {
                 */
 
                 if n > 0 {
-                    process_network_data(&mut program_state, &mut session, &mut data);
-                    if program_state.protocol_state.is_none() {
+                    let new_state = process_network_data(
+                        &mut program_state,
+                        &mut session,
+                        &mut data);
+                    if let State::Done = new_state {
                         break;
+                    } else {
+                        program_state.protocol_state = Some(new_state);
                     }
                 }
             }
@@ -166,25 +171,24 @@ fn main() {
     }
 }
 
-fn process_network_data(program: &mut ProgramState, session: &mut stget::session::Session, data: &mut Vec<u8>) {
-    match program.protocol_state.take() {
-        Some(State::ExpectHello) => {
+fn process_network_data(
+    program: &mut ProgramState,
+    session: &mut stget::session::Session,
+    data: &mut Vec<u8>,
+) -> State {
+    match program.protocol_state.take().unwrap() {
+        State::ExpectHello => {
             debug!("got hello");
-            program.handle_hello(data);
+            program.handle_hello(data)
         },
-        Some(State::ExpectClusterConfig) => {
+        State::ExpectClusterConfig => {
             debug!("got remote cluster config");
-            program.handle_cluster_config(data, session);
+            program.handle_cluster_config(data, session)
         },
-        Some(State::ExpectIndex(index_n, fetch_state)) => {
-            debug!("got index {}", index_n);
-            program.handle_index(data, index_n, fetch_state, session);
+        State::IndexOrBlocks(index_recv_state, fetch_state) => {
+            program.handle_index_or_response(data, session, index_recv_state, fetch_state)
         }
-        Some(State::FetchBlocks(fetch_state)) => {
-            debug!("got block response");
-            program.handle_response(data, fetch_state, session);
-        }
-        None => panic!("bad state"),
+        State::Done => panic!("bad state"),
     }
 }
 
@@ -204,16 +208,21 @@ enum Mode {
 
 #[derive(Debug, Clone, PartialEq)]
 enum State {
+    Done,
     ExpectHello,
     ExpectClusterConfig,
-    ExpectIndex(usize, Option<BlockFetchState>),
-    FetchBlocks(BlockFetchState),
+    IndexOrBlocks(IndexRecvState, Option<BlockFetchState>),
 }
 
 #[derive(Debug)]
 struct FolderInfo {
     label: String,
     max_remote_seq: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct IndexRecvState {
+    index_n: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -226,8 +235,8 @@ struct BlockFetchState {
     current_outstanding: usize,
 }
 
-impl ProgramState {
-    pub fn handle_hello(&mut self, data: &mut Vec<u8>) {
+impl<'a> ProgramState {
+    pub fn handle_hello(&self, data: &mut Vec<u8>) -> State {
         let (len, remote_hello): (usize, proto::Hello) =
             stget::session::Session::read_hello(data).unwrap_or_else(|e| {
                 eprintln!("error reading remote hello: {}", e);
@@ -240,13 +249,13 @@ impl ProgramState {
         data.drain(0..len);
 
         // Wait to send cluster config until we read the remote one.
-        self.protocol_state = Some(State::ExpectClusterConfig);
+        State::ExpectClusterConfig
     }
 
     pub fn handle_cluster_config(
         &mut self, data: &mut Vec<u8>,
         session: &mut stget::session::Session,
-    ) {
+    ) -> State {
         let (len, msgtype, message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
                 eprintln!("Error reading remote cluster config: {}", e);
@@ -258,7 +267,7 @@ impl ProgramState {
             proto::MessageType::CLUSTER_CONFIG => message.as_any().downcast_ref().unwrap(),
             other => {
                 eprintln!("unexpected message type {:?}; wanted CLUSTER_CONFIG", other);
-                return;
+                return State::Done;
             }
         };
 
@@ -310,7 +319,7 @@ impl ProgramState {
                     for folder in remote_cluster_config.get_folders() {
                         eprintln!("    {} ({})", folder.get_label(), folder.get_id());
                     }
-                    std::process::exit(1);
+                    return State::Done;
                 }
 
                 let mut folder = proto::Folder::new();
@@ -334,16 +343,19 @@ impl ProgramState {
             });
 
         eprintln!("receiving folder index");
-        self.protocol_state = Some(State::ExpectIndex(0, None));
+        let index_recv_state = IndexRecvState {
+            index_n: 0,
+        };
+        State::IndexOrBlocks(index_recv_state, None)
     }
 
-    pub fn handle_index(
+    pub fn handle_index_or_response(
         &mut self,
         data: &mut Vec<u8>,
-        index_n: usize,
-        mut fetch_state: Option<BlockFetchState>,
         session: &mut stget::session::Session,
-    ) {
+        mut index_recv_state: IndexRecvState,
+        mut fetch_state: Option<BlockFetchState>,
+    ) -> State {
         let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
         let body_len = NetworkEndian::read_u32(&data[
             2 + header_len as usize
@@ -352,11 +364,10 @@ impl ProgramState {
         if data.len() < data_len {
             debug!("not enough data; reading more (need {}, have {})",
                     data_len, data.len());
-            self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
-            return;
+            return State::IndexOrBlocks(index_recv_state, fetch_state);
         }
 
-        let (input_pos, msgtype, message) = stget::session::Session::read_message(data)
+        let (input_pos, msgtype, mut message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
                 eprintln!("Error reading remote message: {}", e);
                 panic!(e);
@@ -364,38 +375,67 @@ impl ProgramState {
         debug!("{} bytes read", input_pos);
         assert_eq!(data_len, input_pos);
 
-        let index: &proto::Index = match msgtype {
-            proto::MessageType::INDEX => message.as_any().downcast_ref().unwrap(),
-            proto::MessageType::INDEX_UPDATE => unsafe {
+        match msgtype {
+            proto::MessageType::INDEX => {
+                let index: &proto::Index = message.as_any().downcast_ref().unwrap();
+                self.handle_index(index, session, &mut index_recv_state, &mut fetch_state);
+            },
+            proto::MessageType::INDEX_UPDATE => {
                 // Horrible hack relying on the fact that Index and IndexUpdate are the same
-                &*(message.as_any().downcast_ref::<proto::IndexUpdate>().unwrap()
-                    as *const proto::IndexUpdate
-                    as *const proto::Index)
+                let index: &proto::Index = unsafe {
+                    &*(message.as_any().downcast_ref::<proto::IndexUpdate>().unwrap()
+                        as *const proto::IndexUpdate
+                        as *const proto::Index)
+                };
+                self.handle_index(index, session, &mut index_recv_state, &mut fetch_state);
             },
             proto::MessageType::PING => {
                 debug!("got a ping message");
-                self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
-                return;
+                return State::IndexOrBlocks(index_recv_state, fetch_state);
             },
             proto::MessageType::CLOSE => {
                 let close: &proto::Close = message.as_any().downcast_ref().unwrap();
                 debug!("got a close message: {:?}", close);
-                return;
+                return State::Done;
             },
             proto::MessageType::RESPONSE if fetch_state.is_some() => {
-                debug!("in handle_index, got a RESPONSE message");
-                // ignore the protocol state and just handle it
-                self.handle_response(data, fetch_state.unwrap(), session);
-                return;
+                debug!("got a RESPONSE message");
+                let msg: &mut proto::Response = message.as_any_mut().downcast_mut().unwrap();
+                if let Some(new_state) = self.handle_response(
+                    msg, session, fetch_state.as_mut().unwrap())
+                {
+                    return new_state;
+                }
             },
             other => {
                 eprintln!("got an unexpected message type: {:?}", other);
-                return;
+                return State::Done;
             }
         };
 
         data.drain(0..data_len);
 
+        if let (&Mode::Fetch(_), true) = (
+                &self.mode,
+                index_recv_state.index_n != 0 && fetch_state.is_none()
+        ) {
+            eprintln!("No matching file was found in the directory index.");
+            State::Done
+        } else if index_recv_state.index_n == self.folders_by_id.len() {
+            // all done :)
+            State::Done
+        } else {
+            State::IndexOrBlocks(index_recv_state, fetch_state)
+        }
+    }
+
+    fn handle_index(
+        &self,
+        index: &proto::Index,
+        session: &mut stget::session::Session,
+        index_recv_state: &mut IndexRecvState,
+        fetch_state: &mut Option<BlockFetchState>,
+    ) {
         debug!("remote index: {:#?}", index);
 
         let folder_info = &self.folders_by_id[index.get_folder()];
@@ -439,7 +479,7 @@ impl ProgramState {
                         panic!(e);
                     });
 
-                    fetch_state = Some(state);
+                    *fetch_state = Some(state);
                 }
                 _ => ()
             }
@@ -456,76 +496,20 @@ impl ProgramState {
             // It also assumes that the files in each message are sorted by
             // sequence number.
             debug!("got last index update for this folder");
-            debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
+            debug!("index_n = {}; folders_by_id = {}",
+                   index_recv_state.index_n,
+                   self.folders_by_id.len());
 
-            if let Mode::Fetch(_) = self.mode {
-                if let Some(fetch_state) = fetch_state {
-                    self.protocol_state = Some(State::FetchBlocks(fetch_state));
-                } else {
-                    eprintln!("No matching file was found in the directory index.");
-                    self.protocol_state = None;
-                }
-            } else if index_n + 1 == self.folders_by_id.len() {
-                // all done :)
-                self.protocol_state = None;
-            } else {
-                self.protocol_state = Some(State::ExpectIndex(index_n + 1, fetch_state));
-            }
-        } else {
-            self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
+            index_recv_state.index_n += 1;
         }
     }
 
-    pub fn handle_response(
-        &mut self,
-        data: &mut Vec<u8>,
-        mut fetch_state: BlockFetchState,
+    fn handle_response(
+        &self,
+        response: &mut proto::Response,
         session: &mut stget::session::Session,
-    ) {
-        let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
-        let body_len = NetworkEndian::read_u32(&data[
-            2 + header_len as usize
-                .. 2 + header_len as usize + 4]) as usize;
-        if data.len() < header_len + body_len {
-            debug!("not enough data; reading more (need {}, have {})",
-                    header_len + body_len, data.len());
-            self.protocol_state = Some(State::FetchBlocks(fetch_state));
-            return;
-        }
-
-        let (input_pos, msgtype, mut message) = match stget::session::Session::read_message(data) {
-            Ok(stuff) => stuff,
-            Err(stget::Error(
-                stget::ErrorKind::ProtoBuf(
-                    protobuf::ProtobufError::WireError(
-                        protobuf::error::WireError::UnexpectedEof)),
-                _)) => {
-                debug!("we have {:#x} bytes, but need to read more", data.len());
-                self.protocol_state = Some(State::FetchBlocks(fetch_state));
-                return;
-            }
-            Err(e) => {
-                eprintln!("Error reading block response: {}", e);
-                panic!(e);
-            }
-        };
-
-        let response: &mut proto::Response = match msgtype {
-            proto::MessageType::RESPONSE => message.as_any_mut().downcast_mut().unwrap(),
-            proto::MessageType::INDEX_UPDATE => {
-                debug!("in handle_response, got an INDEX_UPDATE");
-                // ignore the protocol state and just handle it
-                self.handle_index(data, 0, Some(fetch_state), session);
-                return;
-            }
-            other => {
-                eprintln!("unexpected message type {:?}; wanted RESPONSE", other);
-                return;
-            }
-        };
-
-        data.drain(0..input_pos);
-
+        fetch_state: &mut BlockFetchState,
+    ) -> Option<State> {
         eprintln!("received block {} / {} -- {} / {} bytes",
                   response.id + 1,
                   fetch_state.block_info.len(),
@@ -535,18 +519,15 @@ impl ProgramState {
             proto::ErrorCode::NO_ERROR => (),
             proto::ErrorCode::GENERIC => {
                 eprintln!("Error: remote host says there is some unspecified error");
-                self.protocol_state = None;
-                return;
+                return Some(State::Done);
             }
             proto::ErrorCode::NO_SUCH_FILE => {
                 eprintln!("Error: remote host says there is no such file");
-                self.protocol_state = None;
-                return;
+                return Some(State::Done);
             }
             proto::ErrorCode::INVALID_FILE => {
                 eprintln!("Error: remote host says invalid file");
-                self.protocol_state = None;
-                return;
+                return Some(State::Done);
             }
         }
 
@@ -557,8 +538,7 @@ impl ProgramState {
             eprintln!("fetched {} bytes", fetch_state.file_size);
             std::io::Write::write_all(&mut std::io::stdout(), &fetch_state.file_data)
                 .expect("write error");
-            self.protocol_state = None;
-            return;
+            return Some(State::Done);
         }
 
         let idx = fetch_state.current_outstanding + 1;
@@ -574,7 +554,7 @@ impl ProgramState {
             panic!(e);
         });
 
-        self.protocol_state = Some(State::FetchBlocks(fetch_state));
+        None
     }
 }
 
