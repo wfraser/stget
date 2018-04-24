@@ -2,9 +2,9 @@
 
 extern crate base32;
 extern crate byteorder;
-extern crate compress;
 #[macro_use] extern crate error_chain;
 extern crate libc;
+extern crate lz4_compress;
 #[macro_use] extern crate log;
 extern crate protobuf;
 extern crate ring;
@@ -14,10 +14,15 @@ error_chain! {
     foreign_links {
         Io(std::io::Error);
         ProtoBuf(protobuf::ProtobufError);
+        //LZ4(lz4_compress::Error); // see https://github.com/redox-os/tfs/pull/85
         Tls(rustls::TLSError);
     }
 
     errors {
+        LZ4 {
+            description("LZ4 decompression error")
+            display("LZ4 decompression error")
+        }
     }
 }
 

@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use byteorder::{ByteOrder, NetworkEndian};
-use compress;
+use lz4_compress;
 use protobuf;
 use protobuf::Message as ProtobufMessage;
 use ring;
@@ -79,25 +79,29 @@ impl Session {
         let body_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
         debug!("body length = {} / {:#x}", body_length, body_length);
 
-        let mut body_protobuf = vec![];
-        match header.get_compression() {
+        let body_protobuf = match header.get_compression() {
             syncthing_proto::MessageCompression::LZ4 => {
                 let uncompressed_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
                 debug!("uncompressed length = {} / {:#x}", uncompressed_length, uncompressed_length);
                 let lz4_slice = &buf[input.pos() as usize
                     .. input.pos() as usize + body_length as usize - 4];
-                let n = compress::lz4::decode_block(lz4_slice, &mut body_protobuf);
-                debug!("{} / {:#x} LZ4 bytes processed", n, n);
+                let body_protobuf = lz4_compress::decompress(lz4_slice)
+                    .map_err(|e| {
+                        error!("LZ4 error: {}", e);
+                        super::ErrorKind::LZ4
+                    })?;
+                debug!("{} / {:#x} LZ4 bytes processed", body_protobuf.len(), body_protobuf.len());
                 if body_protobuf.len() as u32 != uncompressed_length {
                     bail!("uncompressed LZ4 data ({} bytes) doesn't match expected length ({} bytes)",
                             body_protobuf.len(), uncompressed_length);
                 }
                 input.skip_raw_bytes(body_length - 4)?;
+                body_protobuf
             },
             syncthing_proto::MessageCompression::NONE => {
-                input.read_raw_bytes_into(body_length, &mut body_protobuf)?;
+                input.read_raw_bytes(body_length)?
             }
-        }
+        };
 
         let mut body_input = protobuf::CodedInputStream::from_bytes(&body_protobuf);
         let mut body: Box<SyncthingMessage> = match header.get_field_type() {
