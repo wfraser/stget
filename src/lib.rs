@@ -9,6 +9,7 @@ extern crate lz4_compress;
 extern crate protobuf;
 extern crate ring;
 extern crate rustls;
+extern crate webpki;
 
 error_chain! {
     foreign_links {

@@ -12,6 +12,7 @@ use protobuf;
 use protobuf::Message as ProtobufMessage;
 use ring;
 use rustls;
+use webpki;
 
 const HELLO_MAGIC: u32 = 0x2ea7_d90b;
 
@@ -302,8 +303,10 @@ impl SessionBuilder {
             e
         })?;
 
+        let dnsname = webpki::DNSNameRef::try_from_ascii_str("syncthing").unwrap();
+
         Ok(Session {
-            tls: rustls::ClientSession::new(&Arc::new(config), "syncthing"),
+            tls: rustls::ClientSession::new(&Arc::new(config), dnsname),
             stream,
             device_name,
             next_request_id: 0,
@@ -328,8 +331,9 @@ impl rustls::ServerCertVerifier for SyncthingCertVerifier {
         &self,
         _roots: &rustls::RootCertStore,
         presented_certs: &[rustls::Certificate],
-        _dns_name: &str)
-        -> ::std::result::Result<(), rustls::TLSError>
+        _dns_name: webpki::DNSNameRef,
+        _ocsp_response: &[u8])
+        -> ::std::result::Result<rustls::ServerCertVerified, rustls::TLSError>
     {
         use rustls::internal::msgs::codec::Codec;
         debug!("Checking device ID. Server presented {} certificates", presented_certs.len());
@@ -343,7 +347,7 @@ impl rustls::ServerCertVerifier for SyncthingCertVerifier {
             debug!("{}: device ID {}", i, device_id);
             if device_id == self.device_id {
                 debug!("{}: matches", i);
-                return Ok(());
+                return Ok(rustls::ServerCertVerified::assertion());
             } else {
                 warn!("{}: mismatch", i);
             }
