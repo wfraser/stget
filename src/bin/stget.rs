@@ -22,7 +22,7 @@ error_chain! {
 }
 
 fn main() {
-    env_logger::init().unwrap();
+    env_logger::init();
 
     let args = clap::App::new(env!("CARGO_PKG_NAME"))
             .version(env!("CARGO_PKG_VERSION"))
@@ -355,7 +355,6 @@ impl ProgramState {
             self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
             return;
         }
-        //hexdump(data);
 
         let (input_pos, msgtype, message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
@@ -385,7 +384,7 @@ impl ProgramState {
             },
             proto::MessageType::RESPONSE if fetch_state.is_some() => {
                 debug!("in handle_index, got a RESPONSE message");
-                // handle it
+                // ignore the protocol state and just handle it
                 self.handle_response(data, fetch_state.unwrap(), session);
                 return;
             },
@@ -515,7 +514,7 @@ impl ProgramState {
             proto::MessageType::RESPONSE => message.as_any_mut().downcast_mut().unwrap(),
             proto::MessageType::INDEX_UPDATE => {
                 debug!("in handle_response, got an INDEX_UPDATE");
-                // handle it.
+                // ignore the protocol state and just handle it
                 self.handle_index(data, 0, Some(fetch_state), session);
                 return;
             }
