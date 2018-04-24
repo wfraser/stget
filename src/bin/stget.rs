@@ -176,9 +176,9 @@ fn process_network_data(program: &mut ProgramState, session: &mut stget::session
             debug!("got remote cluster config");
             program.handle_cluster_config(data, session);
         },
-        Some(State::ExpectIndex(index_n)) => {
+        Some(State::ExpectIndex(index_n, fetch_state)) => {
             debug!("got index {}", index_n);
-            program.handle_index(data, index_n, session);
+            program.handle_index(data, index_n, fetch_state, session);
         }
         Some(State::FetchBlocks(fetch_state)) => {
             debug!("got block response");
@@ -206,7 +206,7 @@ enum Mode {
 enum State {
     ExpectHello,
     ExpectClusterConfig,
-    ExpectIndex(usize),
+    ExpectIndex(usize, Option<BlockFetchState>),
     FetchBlocks(BlockFetchState),
 }
 
@@ -334,13 +334,14 @@ impl ProgramState {
             });
 
         eprintln!("receiving folder index");
-        self.protocol_state = Some(State::ExpectIndex(0));
+        self.protocol_state = Some(State::ExpectIndex(0, None));
     }
 
     pub fn handle_index(
         &mut self,
         data: &mut Vec<u8>,
         index_n: usize,
+        mut fetch_state: Option<BlockFetchState>,
         session: &mut stget::session::Session,
     ) {
         let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
@@ -351,7 +352,7 @@ impl ProgramState {
         if data.len() < data_len {
             debug!("not enough data; reading more (need {}, have {})",
                     data_len, data.len());
-            self.protocol_state = Some(State::ExpectIndex(index_n));
+            self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
             return;
         }
         //hexdump(data);
@@ -363,7 +364,6 @@ impl ProgramState {
             });
         debug!("{} bytes read", input_pos);
         assert_eq!(data_len, input_pos);
-        data.drain(0..data_len);
 
         let index: &proto::Index = match msgtype {
             proto::MessageType::INDEX => message.as_any().downcast_ref().unwrap(),
@@ -375,7 +375,7 @@ impl ProgramState {
             },
             proto::MessageType::PING => {
                 debug!("got a ping message");
-                self.protocol_state = Some(State::ExpectIndex(index_n));
+                self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
                 return;
             },
             proto::MessageType::CLOSE => {
@@ -383,11 +383,19 @@ impl ProgramState {
                 debug!("got a close message: {:?}", close);
                 return;
             },
+            proto::MessageType::RESPONSE if fetch_state.is_some() => {
+                debug!("in handle_index, got a RESPONSE message");
+                // handle it
+                self.handle_response(data, fetch_state.unwrap(), session);
+                return;
+            },
             other => {
                 eprintln!("got an unexpected message type: {:?}", other);
                 return;
             }
         };
+
+        data.drain(0..data_len);
 
         debug!("remote index: {:#?}", index);
 
@@ -411,7 +419,7 @@ impl ProgramState {
 
                     // request the first block and do a state transition
 
-                    let fetch_state = BlockFetchState {
+                    let state = BlockFetchState {
                         // 32-bit targets gonna have a bad time here
                         file_data: Vec::with_capacity(file.size as usize),
                         file_size: file.size as u64,
@@ -422,26 +430,27 @@ impl ProgramState {
                     };
 
                     session.write_block_request(
-                        fetch_state.folder_id.clone(),
-                        fetch_state.path.clone(),
-                        fetch_state.block_info[0].offset,
-                        fetch_state.block_info[0].size,
-                        fetch_state.block_info[0].hash.clone(),
+                        state.folder_id.clone(),
+                        state.path.clone(),
+                        state.block_info[0].offset,
+                        state.block_info[0].size,
+                        state.block_info[0].hash.clone(),
                     ).unwrap_or_else(|e| {
                         eprintln!("Error sending block request: {}", e);
                         panic!(e);
                     });
 
-                    self.protocol_state = Some(State::FetchBlocks(fetch_state));
-                    return;
+                    fetch_state = Some(state);
                 }
                 _ => ()
             }
         }
 
-        debug!("read sequence number {}; max is {}",
-               files.last().unwrap().get_sequence(),
-               folder_info.max_remote_seq);
+
+        eprintln!("index entries: {} / {}",
+                files.last().unwrap().get_sequence(),
+                folder_info.max_remote_seq);
+
         if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
             // Note that this assumes nothing changed in between when we got the
             // cluster config and now.
@@ -451,7 +460,9 @@ impl ProgramState {
             debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
 
             if let Mode::Fetch(_) = self.mode {
-                if self.protocol_state.is_some() {
+                if let Some(fetch_state) = fetch_state {
+                    self.protocol_state = Some(State::FetchBlocks(fetch_state));
+                } else {
                     eprintln!("No matching file was found in the directory index.");
                     self.protocol_state = None;
                 }
@@ -459,10 +470,10 @@ impl ProgramState {
                 // all done :)
                 self.protocol_state = None;
             } else {
-                self.protocol_state = Some(State::ExpectIndex(index_n + 1));
+                self.protocol_state = Some(State::ExpectIndex(index_n + 1, fetch_state));
             }
         } else {
-            self.protocol_state = Some(State::ExpectIndex(index_n));
+            self.protocol_state = Some(State::ExpectIndex(index_n, fetch_state));
         }
     }
 
@@ -504,10 +515,8 @@ impl ProgramState {
             proto::MessageType::RESPONSE => message.as_any_mut().downcast_mut().unwrap(),
             proto::MessageType::INDEX_UPDATE => {
                 debug!("in handle_response, got an INDEX_UPDATE");
-                self.protocol_state = None;
-                self.handle_index(data, 0, session);
-                debug!("after handling index, state is {:?}", self.protocol_state);
-                self.protocol_state = Some(State::FetchBlocks(fetch_state));
+                // handle it.
+                self.handle_index(data, 0, Some(fetch_state), session);
                 return;
             }
             other => {
@@ -518,7 +527,11 @@ impl ProgramState {
 
         data.drain(0..input_pos);
 
-        debug!("got request {} response", response.id);
+        eprintln!("received block {} / {} -- {} / {} bytes",
+                  response.id + 1,
+                  fetch_state.block_info.len(),
+                  fetch_state.file_data.len() + response.data.len(),
+                  fetch_state.file_size);
         match response.code {
             proto::ErrorCode::NO_ERROR => (),
             proto::ErrorCode::GENERIC => {
