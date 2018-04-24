@@ -84,7 +84,9 @@ impl Session {
             syncthing_proto::MessageCompression::LZ4 => {
                 let uncompressed_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
                 debug!("uncompressed length = {} / {:#x}", uncompressed_length, uncompressed_length);
-                let n = compress::lz4::decode_block(&buf[input.pos() as usize ..], &mut body_protobuf);
+                let lz4_slice = &buf[input.pos() as usize
+                    .. input.pos() as usize + body_length as usize - 4];
+                let n = compress::lz4::decode_block(lz4_slice, &mut body_protobuf);
                 debug!("{} / {:#x} LZ4 bytes processed", n, n);
                 if body_protobuf.len() as u32 != uncompressed_length {
                     bail!("uncompressed LZ4 data ({} bytes) doesn't match expected length ({} bytes)",

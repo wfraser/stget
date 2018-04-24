@@ -347,21 +347,23 @@ impl ProgramState {
         let body_len = NetworkEndian::read_u32(&data[
             2 + header_len as usize
                 .. 2 + header_len as usize + 4]) as usize;
-        if data.len() < header_len + body_len {
+        let data_len = 2 + header_len + 4 + body_len;
+        if data.len() < data_len {
             debug!("not enough data; reading more (need {}, have {})",
-                    header_len + body_len, data.len());
+                    data_len, data.len());
             self.protocol_state = Some(State::ExpectIndex(index_n));
             return;
         }
         //hexdump(data);
 
-        let (len, msgtype, message) = stget::session::Session::read_message(data)
+        let (input_pos, msgtype, message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
                 eprintln!("Error reading remote message: {}", e);
                 panic!(e);
             });
-        debug!("{} bytes read", len);
-        data.drain(0..len);
+        debug!("{} bytes read", input_pos);
+        assert_eq!(data_len, input_pos);
+        data.drain(0..data_len);
 
         let index: &proto::Index = match msgtype {
             proto::MessageType::INDEX => message.as_any().downcast_ref().unwrap(),
@@ -437,6 +439,9 @@ impl ProgramState {
             }
         }
 
+        debug!("read sequence number {}; max is {}",
+               files.last().unwrap().get_sequence(),
+               folder_info.max_remote_seq);
         if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
             // Note that this assumes nothing changed in between when we got the
             // cluster config and now.
@@ -446,8 +451,10 @@ impl ProgramState {
             debug!("index_n = {}; folders_by_id = {}", index_n, self.folders_by_id.len());
 
             if let Mode::Fetch(_) = self.mode {
-                eprintln!("No matching file was found in the directory index.");
-                self.protocol_state = None;
+                if self.protocol_state.is_some() {
+                    eprintln!("No matching file was found in the directory index.");
+                    self.protocol_state = None;
+                }
             } else if index_n + 1 == self.folders_by_id.len() {
                 // all done :)
                 self.protocol_state = None;
@@ -465,7 +472,18 @@ impl ProgramState {
         mut fetch_state: BlockFetchState,
         session: &mut stget::session::Session,
     ) {
-        let (len, msgtype, mut message) = match stget::session::Session::read_message(data) {
+        let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
+        let body_len = NetworkEndian::read_u32(&data[
+            2 + header_len as usize
+                .. 2 + header_len as usize + 4]) as usize;
+        if data.len() < header_len + body_len {
+            debug!("not enough data; reading more (need {}, have {})",
+                    header_len + body_len, data.len());
+            self.protocol_state = Some(State::FetchBlocks(fetch_state));
+            return;
+        }
+
+        let (input_pos, msgtype, mut message) = match stget::session::Session::read_message(data) {
             Ok(stuff) => stuff,
             Err(stget::Error(
                 stget::ErrorKind::ProtoBuf(
@@ -481,15 +499,24 @@ impl ProgramState {
                 panic!(e);
             }
         };
-        data.drain(0..len);
 
         let response: &mut proto::Response = match msgtype {
             proto::MessageType::RESPONSE => message.as_any_mut().downcast_mut().unwrap(),
+            proto::MessageType::INDEX_UPDATE => {
+                debug!("in handle_response, got an INDEX_UPDATE");
+                self.protocol_state = None;
+                self.handle_index(data, 0, session);
+                debug!("after handling index, state is {:?}", self.protocol_state);
+                self.protocol_state = Some(State::FetchBlocks(fetch_state));
+                return;
+            }
             other => {
                 eprintln!("unexpected message type {:?}; wanted RESPONSE", other);
                 return;
             }
         };
+
+        data.drain(0..input_pos);
 
         debug!("got request {} response", response.id);
         match response.code {
@@ -556,10 +583,10 @@ fn hexdump(data: &[u8]) {
         eprint!("  |");
         for h in 0 .. 16 {
             if i * 16 + h < data.len() {
-                let mut c = data[i * 16 + h] as char;
-                if c < ' ' {
-                    c = '.'
-                }
+                let c = match data[i * 16 + h] {
+                    0...0x20 | 0x7f..=0xff => '.',
+                    other => other as char,
+                };
                 eprint!("{}", c);
             } else {
                 eprint!(" ");
