@@ -122,7 +122,7 @@ impl Session {
         Ok((input.pos() as usize, header.get_field_type(), body))
     }
 
-    pub fn write_message<T: ProtobufMessage + protobuf::MessageStatic>(
+    pub fn write_message<T: ProtobufMessage + protobuf::Message>(
         &mut self,
         message: &T,
         message_type: syncthing_proto::MessageType,
