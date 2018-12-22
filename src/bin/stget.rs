@@ -9,6 +9,8 @@ extern crate protobuf;
 extern crate stget;
 
 use std::collections::HashMap;
+use std::fs::File;
+use std::path::{Path, PathBuf};
 use byteorder::{ByteOrder, NetworkEndian};
 use stget::syncthing_proto as proto;
 
@@ -25,29 +27,34 @@ fn main() {
     env_logger::init();
 
     let args = clap::App::new(env!("CARGO_PKG_NAME"))
-            .version(env!("CARGO_PKG_VERSION"))
-            .author(env!("CARGO_PKG_AUTHORS"))
-            .about("experimental Syncthing file retrieval program")
-            .arg(clap::Arg::with_name("address")
-                    .help("Address of the remote host. Port 22000 is used if unspecified.")
-                    .required(true)
-                    .index(1))
-            .arg(clap::Arg::with_name("device_id")
-                    .help("Device ID of the remote host.")
-                    .required(true)
-                    .index(2))
-            .arg(clap::Arg::with_name("path")
-                    .help("File path to fetch.")
-                    .index(3))
-            .arg(clap::Arg::with_name("list")
-                    .short("l")
-                    .long("list")
-                    .takes_value(false)
-                    .help("List all files on the remote end."))
-            .group(clap::ArgGroup::with_name("path_or_list")
-                    .args(&["path", "list"])
-                    .required(true))
-            .get_matches();
+        .version(env!("CARGO_PKG_VERSION"))
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about("experimental Syncthing file retrieval program")
+        .arg(clap::Arg::with_name("address")
+                .help("Address of the remote host. Port 22000 is used if unspecified.")
+                .required(true)
+                .index(1))
+        .arg(clap::Arg::with_name("device_id")
+                .help("Device ID of the remote host.")
+                .required(true)
+                .index(2))
+        .arg(clap::Arg::with_name("path")
+                .help("File path to fetch.")
+                .index(3))
+        .arg(clap::Arg::with_name("list")
+                .short("l")
+                .long("list")
+                .takes_value(false)
+                .help("List all files on the remote end."))
+        .arg(clap::Arg::with_name("destination")
+                .short("d")
+                .long("dest")
+                .takes_value(true)
+                .help("destination path for downloaded file(s)"))
+        .group(clap::ArgGroup::with_name("path_or_list")
+                .args(&["path", "list"])
+                .required(true))
+        .get_matches();
 
     let host_and_port = match args.value_of("address").unwrap() {
         host if host.contains(':') => host.to_owned(),
@@ -107,8 +114,13 @@ fn main() {
         mode: if args.is_present("list") {
             Mode::List
         } else {
-            Mode::Fetch(args.value_of("path").unwrap().to_owned())
+            let path = args.value_of("path").unwrap().to_owned();
+            if !path.contains('/') {
+                panic!("To fetch an entire folder, append a '/' to the path.");
+            }
+            Mode::Fetch(path)
         },
+        destination: args.value_of("destination").unwrap_or(".").to_owned(),
         protocol_state: Some(State::ExpectHello),
     };
 
@@ -153,21 +165,20 @@ fn main() {
         }
     }
 
-    if program_state.protocol_state == Some(State::ExpectHello)
-            || program_state.protocol_state == Some(State::ExpectClusterConfig)
-    {
-        eprintln!("Remote declined to talk with us.");
-        if program_state.protocol_state == Some(State::ExpectHello) {
+    match program_state.protocol_state {
+        Some(State::ExpectHello) | Some(State::ExpectClusterConfig) => {
+            eprintln!("Remote declined to talk with us.");
             let (_len, remote_hello): (usize, proto::Hello) =
-            stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
-                eprintln!("error reading remote hello: {}", e);
-                panic!(e);
-            });
+                stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
+                    eprintln!("error reading remote hello: {}", e);
+                    panic!(e);
+                });
             eprintln!("Remote is \"{}\", running {} {}",
-                    remote_hello.device_name,
-                    remote_hello.client_name,
-                    remote_hello.client_version);
+                      remote_hello.device_name,
+                      remote_hello.client_name,
+                      remote_hello.client_version);
         }
+        _ => ()
     }
 }
 
@@ -186,7 +197,11 @@ fn process_network_data(
             program.handle_cluster_config(data, session)
         },
         State::IndexOrBlocks(index_recv_state, fetch_state) => {
-            program.handle_index_or_response(data, session, index_recv_state, fetch_state)
+            program.handle_index_or_response(
+                data,
+                session,
+                index_recv_state,
+                fetch_state)
         }
         State::Done => panic!("bad state"),
     }
@@ -197,6 +212,7 @@ struct ProgramState {
     remote_cert_hash: Vec<u8>,
     folders_by_id: HashMap<String, FolderInfo>,
     mode: Mode,
+    destination: String,
     protocol_state: Option<State>,
 }
 
@@ -206,7 +222,7 @@ enum Mode {
     Fetch(String),
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 enum State {
     Done,
     ExpectHello,
@@ -225,14 +241,20 @@ struct IndexRecvState {
     index_n: usize,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 struct BlockFetchState {
-    file_size: u64,
+    request_map: HashMap<i32, FileFetchState>,
+}
+
+#[derive(Debug)]
+struct FileFetchState {
+    file: File,
+    size: u64,
+    read_bytes: u64,
+    all_blocks: Vec<proto::BlockInfo>,
+    current_outstanding_idx: usize,
     folder_id: String,
     path: String,
-    block_info: Vec<proto::BlockInfo>,
-    current_outstanding: usize,
-    read_bytes: u64,
 }
 
 impl<'a> ProgramState {
@@ -401,10 +423,21 @@ impl<'a> ProgramState {
             proto::MessageType::RESPONSE if fetch_state.is_some() => {
                 debug!("got a RESPONSE message");
                 let msg: &mut proto::Response = message.as_any_mut().downcast_mut().unwrap();
-                if let Some(new_state) = self.handle_response(
-                    msg, session, fetch_state.as_mut().unwrap())
-                {
-                    return new_state;
+
+                let fetch_state: &mut BlockFetchState = fetch_state.as_mut().unwrap();
+
+                let file_state = fetch_state.request_map
+                    .remove(&msg.id).expect("unexpected message ID");
+
+                match self.handle_response(msg, session, file_state) {
+                    Some((req_id, new_file_state)) => {
+                        fetch_state.request_map.insert(req_id, new_file_state);
+                    }
+                    None => {
+                        if fetch_state.request_map.is_empty() {
+                            return State::Done;
+                        }
+                    }
                 }
             },
             other => {
@@ -429,6 +462,31 @@ impl<'a> ProgramState {
         }
     }
 
+    // Return the destination path for the given file if it matches the check pattern, or None if it
+    // doesn't.
+    fn dest_path(&self, file_path: &str, check_path: &str, folder: &str) -> Option<PathBuf> {
+        eprintln!("file path: {:?}", file_path);
+        eprintln!("chek path: {:?}", check_path);
+
+        let file_part = if check_path.is_empty() {
+            // Degenerate case (whole folder): folder name plus full file path.
+            return Some(Path::new(&self.destination).join(folder).join(file_path));
+        } else if check_path.ends_with('/')
+                && file_path.starts_with(check_path) {
+            // Folder match; start from the last component of the check path.
+            let prefix: &str = check_path.rsplitn(3, '/').nth(2).unwrap_or("");
+            Path::new(&file_path[prefix.len()..])
+        } else if file_path == check_path {
+            // Exact match; just use the file name.
+            Path::new(Path::new(file_path).file_name().unwrap())
+        } else {
+            return None;
+        };
+
+        Some(Path::new(&self.destination)
+            .join(file_part))
+    }
+
     fn handle_index(
         &self,
         index: &proto::Index,
@@ -442,43 +500,75 @@ impl<'a> ProgramState {
         let files = index.get_files();
 
         for file in files {
-            if file.get_field_type() == proto::FileInfoType::DIRECTORY
-                    || file.get_deleted() {
+            if file.get_deleted() {
+                continue;
+            }
+            if file.get_field_type() == proto::FileInfoType::DIRECTORY {
+                if let Mode::Fetch(ref check_path) = self.mode {
+                    if !check_path.ends_with('/')
+                         && &check_path[folder_info.label.len() + 1 ..] == file.get_name()
+                    {
+                        panic!("Cannot fetch a directory entry. To recursively fetch a whole \
+                                directory, append a '/' to the path.");
+                    }
+                }
                 continue;
             }
 
-            let path = format!("{}/{}", folder_info.label, file.get_name());
+            let display_path = format!("{}/{}", folder_info.label, file.get_name());
             match self.mode {
                 Mode::List => {
-                    println!("{}", path);
+                    println!("{}", display_path);
                 }
-                Mode::Fetch(ref check_path) if check_path == &path => {
-                    debug!("found the file");
-                    eprintln!("requesting the file");
-
-                    let state = BlockFetchState {
-                        file_size: file.size as u64,
-                        folder_id: index.folder.clone(),
-                        path: file.get_name().to_owned(),
-                        block_info: file.get_Blocks().to_owned(),
-                        current_outstanding: 0,
-                        read_bytes: 0,
+                Mode::Fetch(ref check_path) => {
+                    let dest_path = match self.dest_path(
+                            file.get_name(),
+                            &check_path[folder_info.label.len() + 1 ..],
+                            &folder_info.label) {
+                        Some(p) => p,
+                        None => continue
                     };
 
-                    session.write_block_request(
-                        state.folder_id.clone(),
-                        state.path.clone(),
-                        state.block_info[0].offset,
-                        state.block_info[0].size,
-                        state.block_info[0].hash.clone(),
+                    debug!("found matching file: {:?}", display_path);
+                    eprintln!("requesting file: {:?}", display_path);
+
+                    eprintln!("dest path: {:?}", dest_path);
+                    debug!("destination path: {:?}", dest_path);
+
+                    std::fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
+                    let fs_file = File::create(dest_path).unwrap();
+
+                    let all_blocks = file.get_Blocks().to_owned();
+
+                    let req_id = session.write_block_request(
+                        index.folder.clone(),
+                        file.get_name().to_owned(),
+                        all_blocks[0].offset,
+                        all_blocks[0].size,
+                        all_blocks[0].hash.clone()
                     ).unwrap_or_else(|e| {
                         eprintln!("Error sending block request: {}", e);
                         panic!(e);
                     });
 
-                    *fetch_state = Some(state);
+                    let block_state = FileFetchState {
+                        file: fs_file,
+                        size: file.size as u64,
+                        read_bytes: 0,
+                        all_blocks,
+                        current_outstanding_idx: 0,
+                        folder_id: index.folder.clone(),
+                        path: file.get_name().to_owned(),
+                    };
+
+                    if let Some(state) = fetch_state {
+                        state.request_map.insert(req_id, block_state);
+                    } else {
+                        let mut m = HashMap::new();
+                        m.insert(req_id, block_state);
+                        *fetch_state = Some(BlockFetchState { request_map: m });
+                    }
                 }
-                _ => ()
             }
         }
 
@@ -505,55 +595,56 @@ impl<'a> ProgramState {
         &self,
         response: &mut proto::Response,
         session: &mut stget::session::Session,
-        fetch_state: &mut BlockFetchState,
-    ) -> Option<State> {
+        mut fetch_state: FileFetchState,
+    ) -> Option<(i32, FileFetchState)> {
 
         fetch_state.read_bytes += response.data.len() as u64;
-        eprintln!("received block {} / {} -- {} / {} bytes",
+        eprintln!("{:?}: received block {} / {} -- {} / {} bytes",
+                  fetch_state.path,
                   response.id + 1,
-                  fetch_state.block_info.len(),
+                  fetch_state.all_blocks.len(),
                   fetch_state.read_bytes,
-                  fetch_state.file_size);
+                  fetch_state.size);
 
         match response.code {
             proto::ErrorCode::NO_ERROR => (),
             proto::ErrorCode::GENERIC => {
                 eprintln!("Error: remote host says there is some unspecified error");
-                return Some(State::Done);
+                return None;
             }
             proto::ErrorCode::NO_SUCH_FILE => {
                 eprintln!("Error: remote host says there is no such file");
-                return Some(State::Done);
+                return None;
             }
             proto::ErrorCode::INVALID_FILE => {
                 eprintln!("Error: remote host says invalid file");
-                return Some(State::Done);
+                return None;
             }
         }
 
-        std::io::Write::write_all(&mut std::io::stdout(), &response.data)
-            .expect("write error");
+        std::io::Write::write_all(&mut fetch_state.file, &response.data)
+            .expect("file write error");
 
-        if fetch_state.current_outstanding == fetch_state.block_info.len() - 1 {
-            assert_eq!(fetch_state.file_size, fetch_state.read_bytes);
-            eprintln!("fetched {} bytes", fetch_state.file_size);
-            return Some(State::Done);
+        if fetch_state.current_outstanding_idx == fetch_state.all_blocks.len() - 1 {
+            assert_eq!(fetch_state.size, fetch_state.read_bytes);
+            eprintln!("fetched {} bytes", fetch_state.size);
+            return None;
         }
 
-        let idx = fetch_state.current_outstanding + 1;
-        fetch_state.current_outstanding += 1;
-        session.write_block_request(
+        let idx = fetch_state.current_outstanding_idx + 1;
+        fetch_state.current_outstanding_idx += 1;
+        let req_id = session.write_block_request(
             fetch_state.folder_id.clone(),
             fetch_state.path.clone(),
-            fetch_state.block_info[idx].offset,
-            fetch_state.block_info[idx].size,
-            fetch_state.block_info[idx].hash.clone()
+            fetch_state.all_blocks[idx].offset,
+            fetch_state.all_blocks[idx].size,
+            fetch_state.all_blocks[idx].hash.clone()
         ).unwrap_or_else(|e| {
             eprintln!("Error sending block request: {}", e);
             panic!(e);
         });
 
-        None
+        Some((req_id, fetch_state))
     }
 }
 
