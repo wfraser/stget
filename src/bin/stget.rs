@@ -125,30 +125,10 @@ fn main() {
     };
 
     let mut data = vec![];
-    while let Ok((r, w)) = session.complete_io() {
-        if r == 0 && w == 0 {
-            break;
-        }
-        debug!("r = {}, w = {}", r, w);
-        let data_len = data.len();
+    while let Ok(_) = session.complete_io() {
         match session.read_to_end(&mut data) {
-            Err(stget::Error(stget::ErrorKind::Io(ref e), _))
-                    if e.kind() == std::io::ErrorKind::ConnectionAborted => {
-                eprintln!("connection closed");
-                break;
-            },
-            Err(e) => {
-                debug!("len was {}, now is {}", data_len, data.len());
-                panic!("read error: {:?}", e)
-            },
             Ok(n) => {
                 debug!("read {}", n);
-                /*
-                if w == 0 && n == r {
-                    eprintln!("done");
-                    break;
-                }
-                */
 
                 if n > 0 {
                     let new_state = process_network_data(
@@ -161,6 +141,18 @@ fn main() {
                         program_state.protocol_state = Some(new_state);
                     }
                 }
+            }
+            Err(e) => {
+                if let stget::Error(stget::ErrorKind::Io(ref e), _) = e {
+                    if e.kind() == std::io::ErrorKind::ConnectionAborted {
+                        eprintln!("Connection closed.");
+                    } else {
+                        eprintln!("Read error: {}", e);
+                    }
+                } else {
+                    eprintln!("Unknown error: {}", e);
+                }
+                break;
             }
         }
     }
@@ -465,8 +457,6 @@ impl<'a> ProgramState {
     // Return the destination path for the given file if it matches the check pattern, or None if it
     // doesn't.
     fn dest_path(&self, file_path: &str, check_path: &str, folder: &str) -> Option<PathBuf> {
-        eprintln!("file path: {:?}", file_path);
-        eprintln!("chek path: {:?}", check_path);
 
         let file_part = if check_path.is_empty() {
             // Degenerate case (whole folder): folder name plus full file path.
@@ -531,8 +521,6 @@ impl<'a> ProgramState {
 
                     debug!("found matching file: {:?}", display_path);
                     eprintln!("requesting file: {:?}", display_path);
-
-                    eprintln!("dest path: {:?}", dest_path);
                     debug!("destination path: {:?}", dest_path);
 
                     std::fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
@@ -650,7 +638,7 @@ impl<'a> ProgramState {
 
 #[allow(dead_code)]
 fn hexdump(data: &[u8]) {
-    for i in 0 .. ((data.len() / 16) + 1) {
+    for i in 0 ..= (data.len() / 16) {
         eprint!("{:04x}  ", i * 16);
         for h in 0 .. 16 {
             if i * 16 + h < data.len() {

@@ -4,7 +4,7 @@ use base32;
 #[cfg(unix)]
 use libc;
 
-#[allow(many_single_char_names)]
+#[allow(clippy::many_single_char_names)]
 pub fn device_id_from_hash(hash: &[u8]) -> String {
     let s = base32::encode(
         base32::Alphabet::RFC4648 { padding: false },
