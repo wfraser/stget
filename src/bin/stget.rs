@@ -526,7 +526,7 @@ impl<'a> ProgramState {
                     std::fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
                     let fs_file = File::create(dest_path).unwrap();
 
-                    let all_blocks = file.get_Blocks().to_owned();
+                    let all_blocks = file.get_blocks().to_owned();
 
                     let req_id = session.write_block_request(
                         index.folder.clone(),
