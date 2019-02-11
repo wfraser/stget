@@ -464,8 +464,11 @@ impl<'a> ProgramState {
         } else if check_path.ends_with('/')
                 && file_path.starts_with(check_path) {
             // Folder match; start from the last component of the check path.
-            let prefix: &str = check_path.rsplitn(3, '/').nth(2).unwrap_or("");
-            Path::new(&file_path[prefix.len()..])
+            let prefix_len = match check_path.rsplitn(3, '/').nth(2) {
+                Some(prefix) => prefix.len() + 1,
+                None => 0,
+            };
+            Path::new(&file_path[prefix_len..])
         } else if file_path == check_path {
             // Exact match; just use the file name.
             Path::new(Path::new(file_path).file_name().unwrap())
