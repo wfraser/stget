@@ -4,15 +4,15 @@ version = "0.1.0"
 authors = ["Bill Fraser <wfraser@codewise.org>"]
 
 [dependencies]
-base32 = "0.3"
+base32 = "0.4"
 bufstream = "0.1"
 byteorder = "1.0"
 clap = "2.25"
-env_logger = "0.5"
+env_logger = "0.7"
 error-chain = "0.12"
 libc = "0.2"
 log = "0.4"
-lz4-compress = "0.1"
+lz4-compression = "0.6"
 protobuf = "2.6"
 ring = "0.13.0-alpha"
 webpki = "0.18.0-alpha"

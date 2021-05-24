@@ -657,7 +657,7 @@ fn hexdump(data: &[u8]) {
         for h in 0 .. 16 {
             if i * 16 + h < data.len() {
                 let c = match data[i * 16 + h] {
-                    0...0x20 | 0x7f..=0xff => '.',
+                    0..=0x19 | 0x7f..=0xff => '.',
                     other => other as char,
                 };
                 eprint!("{}", c);

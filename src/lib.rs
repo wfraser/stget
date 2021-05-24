@@ -4,7 +4,7 @@ extern crate base32;
 extern crate byteorder;
 #[macro_use] extern crate error_chain;
 extern crate libc;
-extern crate lz4_compress;
+extern crate lz4_compression;
 #[macro_use] extern crate log;
 extern crate protobuf;
 extern crate ring;

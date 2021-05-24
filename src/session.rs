@@ -7,7 +7,7 @@ use std::net::TcpStream;
 use std::sync::Arc;
 
 use byteorder::{ByteOrder, NetworkEndian};
-use lz4_compress;
+use lz4_compression;
 use protobuf;
 use protobuf::Message as ProtobufMessage;
 use ring;
@@ -86,9 +86,9 @@ impl Session {
                 debug!("uncompressed length = {} / {:#x}", uncompressed_length, uncompressed_length);
                 let lz4_slice = &buf[input.pos() as usize
                     .. input.pos() as usize + body_length as usize - 4];
-                let body_protobuf = lz4_compress::decompress(lz4_slice)
+                let body_protobuf = lz4_compression::decompress::decompress(lz4_slice)
                     .map_err(|e| {
-                        error!("LZ4 error: {}", e);
+                        error!("LZ4 error: {:?}", e);
                         super::ErrorKind::LZ4
                     })?;
                 debug!("{} / {:#x} LZ4 bytes processed", body_protobuf.len(), body_protobuf.len());
