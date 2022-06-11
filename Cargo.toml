@@ -13,7 +13,7 @@ error-chain = "0.12"
 libc = "0.2"
 log = "0.4"
 lz4-compress = "0.1"
-protobuf = "2.0"
+protobuf = "2.6"
 ring = "0.13.0-alpha"
 webpki = "0.18.0-alpha"
 
