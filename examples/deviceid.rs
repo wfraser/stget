@@ -1,8 +1,3 @@
-extern crate clap;
-extern crate ring;
-extern crate rustls;
-extern crate stget;
-
 use std::path::Path;
 use std::process::exit;
 use rustls::internal::msgs::codec::Codec;
@@ -20,7 +15,8 @@ fn main() {
                 .args(&["der", "pem"])
                 .required(true))
             .arg(clap::Arg::new("path")
-                .required(true))
+                .required(true)
+                .allow_invalid_utf8(true))
             .get_matches();
 
     let path = Path::new(matches.value_of_os("path").unwrap());
