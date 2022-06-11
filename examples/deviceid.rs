@@ -8,18 +8,18 @@ use std::process::exit;
 use rustls::internal::msgs::codec::Codec;
 
 fn main() {
-    let matches = clap::App::new("deviceid")
-            .help("Calculates the Syncthing Device ID of a given DER- or PEM-encoded certificate.")
-            .arg(clap::Arg::with_name("der")
+    let matches = clap::Command::new("deviceid")
+            .about("Calculates the Syncthing Device ID of a given DER- or PEM-encoded certificate.")
+            .arg(clap::Arg::new("der")
                 .long("der")
                 .takes_value(false))
-            .arg(clap::Arg::with_name("pem")
+            .arg(clap::Arg::new("pem")
                 .long("pem")
                 .takes_value(false))
-            .group(clap::ArgGroup::with_name("format")
+            .group(clap::ArgGroup::new("format")
                 .args(&["der", "pem"])
                 .required(true))
-            .arg(clap::Arg::with_name("path")
+            .arg(clap::Arg::new("path")
                 .required(true))
             .get_matches();
 

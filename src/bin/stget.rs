@@ -1,5 +1,3 @@
-#![allow(unknown_lints)]
-
 #[macro_use] extern crate log;
 
 use std::collections::HashMap;
@@ -84,7 +82,7 @@ fn main() {
     });
 
     let mut session = stget::session::SessionBuilder {
-        remote_host_and_port: host_and_port.to_string(),
+        remote_host_and_port: host_and_port,
         remote_device_id: device_id.to_string(),
         local_device_name: None,
         client_cert: cert,
@@ -110,7 +108,7 @@ fn main() {
     };
 
     let mut data = vec![];
-    while let Ok(_) = session.complete_io() {
+    while session.complete_io().is_ok() {
         match session.read_to_end(&mut data) {
             Ok(n) => {
                 debug!("read {}", n);
@@ -212,7 +210,7 @@ struct FolderInfo {
     max_remote_seq: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct IndexRecvState {
     index_n: usize,
 }
@@ -233,7 +231,7 @@ struct FileFetchState {
     path: String,
 }
 
-impl<'a> ProgramState {
+impl ProgramState {
     pub fn handle_hello(&self, data: &mut Vec<u8>) -> State {
         let (len, remote_hello): (usize, proto::Hello) =
             stget::session::Session::read_hello(data).unwrap_or_else(|e| {
@@ -300,7 +298,7 @@ impl<'a> ProgramState {
                 }
             },
             Mode::Fetch(ref path) => {
-                let folder_name = path.splitn(2, '/').next().unwrap();
+                let folder_name = path.split('/').next().unwrap();
 
                 let mut folder_id = None;
                 for folder in &remote_cluster_config.folders {
@@ -319,7 +317,7 @@ impl<'a> ProgramState {
                 }
 
                 let mut folder = proto::Folder::new();
-                folder.id = folder_id.unwrap().to_owned();
+                folder.id = folder_id.unwrap();
                 folder.label = folder_name.to_owned();
                 folder.read_only = true;
                 folder.ignore_permissions = true;
@@ -478,7 +476,7 @@ impl<'a> ProgramState {
             if file.type_.unwrap() == proto::FileInfoType::DIRECTORY {
                 if let Mode::Fetch(ref check_path) = self.mode {
                     if !check_path.ends_with('/')
-                         && &check_path[folder_info.label.len() + 1 ..] == file.name
+                         && check_path[folder_info.label.len() + 1 ..] == file.name
                     {
                         panic!("Cannot fetch a directory entry. To recursively fetch a whole \
                                 directory, append a '/' to the path.");
