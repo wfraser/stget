@@ -1,7 +1,7 @@
-use super::{Result, ResultExt};
-use super::SyncthingMessage;
-use super::syncthing_proto;
-use super::util;
+use anyhow::{bail, Context, Result};
+use crate::SyncthingMessage;
+use crate::syncthing_proto;
+use crate::util;
 use std::io;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -32,9 +32,9 @@ impl Session {
         output.write_raw_bytes(&magic)?;
 
         let mut hello = syncthing_proto::Hello::new();
-        hello.set_device_name(self.device_name.clone());
-        hello.set_client_name(env!("CARGO_PKG_NAME").to_owned());
-        hello.set_client_version(env!("CARGO_PKG_VERSION").to_owned());
+        hello.device_name = self.device_name.clone();
+        hello.client_name = env!("CARGO_PKG_NAME").to_owned();
+        hello.client_version = env!("CARGO_PKG_VERSION").to_owned();
 
         let mut len = [0u8;2];
         NetworkEndian::write_u16(&mut len, hello.compute_size() as u16);
@@ -60,37 +60,34 @@ impl Session {
                 len, buf.len() as u64 - input.pos());
 
         let mut hello = syncthing_proto::Hello::new();
-        hello.merge_from(&mut input).chain_err(|| "error reading Hello")?;
+        hello.merge_from(&mut input).context("error reading Hello")?;
 
         Ok((input.pos() as usize, hello))
     }
 
     pub fn read_message(buf: &[u8])
-            -> Result<(usize, syncthing_proto::MessageType, Box<SyncthingMessage>)> {
+            -> Result<(usize, syncthing_proto::MessageType, Box<dyn SyncthingMessage>)> {
         let mut input = protobuf::CodedInputStream::from_bytes(buf);
 
         let header_length = NetworkEndian::read_u16(&input.read_raw_bytes(2)?);
         let mut header = syncthing_proto::Header::new();
         let old_limit = input.push_limit(u64::from(header_length))?;
-        header.merge_from(&mut input).chain_err(|| "error reading message header")?;
+        header.merge_from(&mut input).context("error reading message header")?;
         input.pop_limit(old_limit);
 
-        debug!("header: {:?}, compression: {:?}", header.get_field_type(), header.get_compression());
+        debug!("header: {:?}, compression: {:?}", header.type_, header.compression);
 
         let body_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
         debug!("body length = {} / {:#x}", body_length, body_length);
 
-        let body_protobuf = match header.get_compression() {
+        let body_protobuf = match header.compression.unwrap() {
             syncthing_proto::MessageCompression::LZ4 => {
                 let uncompressed_length = NetworkEndian::read_u32(&input.read_raw_bytes(4)?);
                 debug!("uncompressed length = {} / {:#x}", uncompressed_length, uncompressed_length);
                 let lz4_slice = &buf[input.pos() as usize
                     .. input.pos() as usize + body_length as usize - 4];
                 let body_protobuf = lz4_compression::decompress::decompress(lz4_slice)
-                    .map_err(|e| {
-                        error!("LZ4 error: {:?}", e);
-                        super::ErrorKind::LZ4
-                    })?;
+                    .map_err(|e| anyhow::anyhow!("LZ4 decrompression error: {:?}", e))?;
                 debug!("{} / {:#x} LZ4 bytes processed", body_protobuf.len(), body_protobuf.len());
                 if body_protobuf.len() as u32 != uncompressed_length {
                     bail!("uncompressed LZ4 data ({} bytes) doesn't match expected length ({} bytes)",
@@ -105,7 +102,7 @@ impl Session {
         };
 
         let mut body_input = protobuf::CodedInputStream::from_bytes(&body_protobuf);
-        let mut body: Box<SyncthingMessage> = match header.get_field_type() {
+        let mut body: Box<dyn SyncthingMessage> = match header.type_.unwrap() {
             syncthing_proto::MessageType::CLUSTER_CONFIG    => Box::new(syncthing_proto::ClusterConfig::new()),
             syncthing_proto::MessageType::INDEX             => Box::new(syncthing_proto::Index::new()),
             syncthing_proto::MessageType::INDEX_UPDATE      => Box::new(syncthing_proto::IndexUpdate::new()),
@@ -115,11 +112,11 @@ impl Session {
             syncthing_proto::MessageType::PING              => Box::new(syncthing_proto::Ping::new()),
             syncthing_proto::MessageType::CLOSE             => Box::new(syncthing_proto::Close::new()),
         };
-        body.as_mut().as_protobuf_message().merge_from(&mut body_input)?;
+        body.as_mut().as_protobuf_message().merge_from_dyn(&mut body_input)?;
 
         debug!("body_input pos: {}", body_input.pos());
 
-        Ok((input.pos() as usize, header.get_field_type(), body))
+        Ok((input.pos() as usize, header.type_.unwrap(), body))
     }
 
     pub fn write_message<T: ProtobufMessage + protobuf::Message>(
@@ -131,8 +128,8 @@ impl Session {
         let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
 
         let mut header = syncthing_proto::Header::new();
-        header.set_compression(syncthing_proto::MessageCompression::NONE);
-        header.set_field_type(message_type);
+        header.compression = syncthing_proto::MessageCompression::NONE.into();
+        header.type_ = message_type.into();
 
         let mut header_len = [0u8; 2];
         NetworkEndian::write_u16(&mut header_len, header.compute_size() as u16);
@@ -140,7 +137,7 @@ impl Session {
         header.write_to_with_cached_sizes(&mut output)?;
 
         let mut body_len = [0u8; 4];
-        NetworkEndian::write_u32(&mut body_len, message.compute_size());
+        NetworkEndian::write_u32(&mut body_len, message.compute_size() as u32);
         output.write_raw_bytes(&body_len)?;
         message.write_to_with_cached_sizes(&mut output)?;
 
@@ -167,13 +164,13 @@ impl Session {
         debug!("    size: {:?}", size);
 
         let mut req = syncthing_proto::Request::new();
-        req.set_id(request_id);
-        req.set_folder(folder);
-        req.set_name(path);
-        req.set_offset(offset);
-        req.set_size(size);
-        req.set_hash(hash);
-        req.set_from_temporary(false);
+        req.id = request_id;
+        req.folder = folder;
+        req.name = path;
+        req.offset = offset;
+        req.size = size;
+        req.hash = hash;
+        req.from_temporary = false;
 
         self.write_message(&req, syncthing_proto::MessageType::REQUEST)?;
         Ok(request_id)
@@ -291,7 +288,7 @@ impl SessionBuilder {
                 },
                 Err(e) => {
                     error!("failed to get the system hostname: {}", e);
-                    return Err(e).chain_err(|| "failed to get the system hostname");
+                    return Err(e).context("failed to get the system hostname");
                 }
             }
         };

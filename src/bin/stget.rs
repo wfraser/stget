@@ -1,27 +1,12 @@
 #![allow(unknown_lints)]
 
-extern crate byteorder;
-extern crate clap;
-extern crate env_logger;
-#[macro_use] extern crate error_chain;
 #[macro_use] extern crate log;
-extern crate protobuf;
-extern crate stget;
 
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use byteorder::{ByteOrder, NetworkEndian};
 use stget::syncthing_proto as proto;
-
-error_chain! {
-    foreign_links {
-        Io(std::io::Error);
-    }
-
-    errors {
-    }
-}
 
 fn main() {
     env_logger::init();
@@ -143,7 +128,7 @@ fn main() {
                 }
             }
             Err(e) => {
-                if let stget::Error(stget::ErrorKind::Io(ref e), _) = e {
+                if let Some(e) = e.downcast_ref::<std::io::Error>() {
                     if e.kind() == std::io::ErrorKind::ConnectionAborted {
                         eprintln!("Connection closed.");
                     } else {
@@ -286,15 +271,15 @@ impl<'a> ProgramState {
 
         let mut cluster_config = proto::ClusterConfig::new();
 
-        for folder in remote_cluster_config.get_folders() {
-            for device in folder.get_devices() {
-                let device_cert_hash: &[u8] = device.get_id();
+        for folder in &remote_cluster_config.folders {
+            for device in &folder.devices {
+                let device_cert_hash: &[u8] = &device.id;
                 if device_cert_hash == self.remote_cert_hash.as_slice() {
                     self.folders_by_id.insert(
-                        folder.get_id().to_owned(),
+                        folder.id.clone(),
                         FolderInfo {
-                            label: folder.get_label().to_owned(),
-                            max_remote_seq: device.get_max_sequence(),
+                            label: folder.label.clone(),
+                            max_remote_seq: device.max_sequence,
                         });
                 }
             }
@@ -303,44 +288,44 @@ impl<'a> ProgramState {
         match self.mode {
             Mode::List => {
                 // make a cluster config with all the folders in the remote
-                for remote_folder in remote_cluster_config.get_folders() {
+                for remote_folder in &remote_cluster_config.folders {
                     let mut folder = proto::Folder::new();
-                    folder.set_id(remote_folder.get_id().to_owned());
-                    folder.set_label(remote_folder.get_label().to_owned());
-                    folder.set_read_only(true);
-                    folder.set_ignore_permissions(true);
-                    folder.set_ignore_delete(true);
-                    folder.set_disable_temp_indexes(true);
-                    cluster_config.mut_folders().push(folder);
+                    folder.id = remote_folder.id.clone();
+                    folder.label = remote_folder.label.clone();
+                    folder.read_only = true;
+                    folder.ignore_permissions = true;
+                    folder.ignore_delete = true;
+                    folder.disable_temp_indexes = true;
+                    cluster_config.folders.push(folder);
                 }
             },
             Mode::Fetch(ref path) => {
                 let folder_name = path.splitn(2, '/').next().unwrap();
 
                 let mut folder_id = None;
-                for folder in remote_cluster_config.get_folders() {
-                    if folder.get_label() == folder_name {
-                        folder_id = Some(folder.get_id());
+                for folder in &remote_cluster_config.folders {
+                    if folder.label == folder_name {
+                        folder_id = Some(folder.id.clone());
                         break;
                     }
                 }
                 if folder_id.is_none() {
                     eprintln!("The remote computer is not offering a folder with the specified name (\"{}\").", folder_name);
                     eprintln!("it offered:");
-                    for folder in remote_cluster_config.get_folders() {
-                        eprintln!("    {} ({})", folder.get_label(), folder.get_id());
+                    for folder in &remote_cluster_config.folders {
+                        eprintln!("    {} ({})", folder.label, folder.id);
                     }
                     return State::Done;
                 }
 
                 let mut folder = proto::Folder::new();
-                folder.set_id(folder_id.unwrap().to_owned());
-                folder.set_label(folder_name.to_owned());
-                folder.set_read_only(true);
-                folder.set_ignore_permissions(true);
-                folder.set_ignore_delete(true);
-                folder.set_disable_temp_indexes(true);
-                cluster_config.mut_folders().push(folder);
+                folder.id = folder_id.unwrap().to_owned();
+                folder.label = folder_name.to_owned();
+                folder.read_only = true;
+                folder.ignore_permissions = true;
+                folder.ignore_delete = true;
+                folder.disable_temp_indexes = true;
+                cluster_config.folders.push(folder);
             }
         }
 
@@ -484,17 +469,16 @@ impl<'a> ProgramState {
     ) {
         debug!("remote index: {:#?}", index);
 
-        let folder_info = &self.folders_by_id[index.get_folder()];
-        let files = index.get_files();
+        let folder_info = &self.folders_by_id[&index.folder];
 
-        for file in files {
-            if file.get_deleted() {
+        for file in &index.files {
+            if file.deleted {
                 continue;
             }
-            if file.get_field_type() == proto::FileInfoType::DIRECTORY {
+            if file.type_.unwrap() == proto::FileInfoType::DIRECTORY {
                 if let Mode::Fetch(ref check_path) = self.mode {
                     if !check_path.ends_with('/')
-                         && &check_path[folder_info.label.len() + 1 ..] == file.get_name()
+                         && &check_path[folder_info.label.len() + 1 ..] == file.name
                     {
                         panic!("Cannot fetch a directory entry. To recursively fetch a whole \
                                 directory, append a '/' to the path.");
@@ -503,14 +487,14 @@ impl<'a> ProgramState {
                 continue;
             }
 
-            let display_path = format!("{}/{}", folder_info.label, file.get_name());
+            let display_path = format!("{}/{}", folder_info.label, file.name);
             match self.mode {
                 Mode::List => {
                     println!("{}", display_path);
                 }
                 Mode::Fetch(ref check_path) => {
                     let dest_path = match self.dest_path(
-                            file.get_name(),
+                            &file.name,
                             &check_path[folder_info.label.len() + 1 ..],
                             &folder_info.label) {
                         Some(p) => p,
@@ -524,14 +508,12 @@ impl<'a> ProgramState {
                     std::fs::create_dir_all(dest_path.parent().unwrap()).unwrap();
                     let fs_file = File::create(dest_path).unwrap();
 
-                    let all_blocks = file.get_blocks().to_owned();
-
                     let req_id = session.write_block_request(
                         index.folder.clone(),
-                        file.get_name().to_owned(),
-                        all_blocks[0].offset,
-                        all_blocks[0].size,
-                        all_blocks[0].hash.clone()
+                        file.name.to_owned(),
+                        file.blocks[0].offset,
+                        file.blocks[0].size,
+                        file.blocks[0].hash.clone()
                     ).unwrap_or_else(|e| {
                         panic!("Error sending block request: {}", e);
                     });
@@ -540,10 +522,10 @@ impl<'a> ProgramState {
                         file: fs_file,
                         size: file.size as u64,
                         read_bytes: 0,
-                        all_blocks,
+                        all_blocks: file.blocks.clone(),
                         current_outstanding_idx: 0,
                         folder_id: index.folder.clone(),
-                        path: file.get_name().to_owned(),
+                        path: file.name.clone(),
                     };
 
                     if let Some(state) = fetch_state {
@@ -559,10 +541,10 @@ impl<'a> ProgramState {
 
 
         eprintln!("index entries: {} / {}",
-                files.last().unwrap().get_sequence(),
+                index.files.last().unwrap().sequence,
                 folder_info.max_remote_seq);
 
-        if files[files.len() - 1].get_sequence() >= folder_info.max_remote_seq {
+        if index.files[index.files.len() - 1].sequence >= folder_info.max_remote_seq {
             // Note that this assumes nothing changed in between when we got the
             // cluster config and now.
             // It also assumes that the files in each message are sorted by
@@ -591,7 +573,7 @@ impl<'a> ProgramState {
                   fetch_state.read_bytes,
                   fetch_state.size);
 
-        match response.code {
+        match response.code.unwrap() {
             proto::ErrorCode::NO_ERROR => (),
             proto::ErrorCode::GENERIC => {
                 eprintln!("Error: remote host says there is some unspecified error");
