@@ -12,12 +12,11 @@ use protobuf;
 use protobuf::Message as ProtobufMessage;
 use ring;
 use rustls;
-use webpki;
 
 const HELLO_MAGIC: u32 = 0x2ea7_d90b;
 
 pub struct Session {
-    tls: rustls::ClientSession,
+    tls: rustls::ClientConnection,
     stream: TcpStream,
     device_name: String,
     next_request_id: i32,
@@ -25,7 +24,8 @@ pub struct Session {
 
 impl Session {
     pub fn write_hello(&mut self) -> Result<()> {
-        let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
+        let mut tls_writer = self.tls.writer();
+        let mut output = protobuf::CodedOutputStream::new(&mut tls_writer);
 
         let mut magic = [0u8;4];
         NetworkEndian::write_u32(&mut magic, HELLO_MAGIC);
@@ -125,7 +125,8 @@ impl Session {
         message_type: syncthing_proto::MessageType,
         ) -> Result<()>
     {
-        let mut output = protobuf::CodedOutputStream::new(&mut self.tls);
+        let mut tls_writer = self.tls.writer();
+        let mut output = protobuf::CodedOutputStream::new(&mut tls_writer);
 
         let mut header = syncthing_proto::Header::new();
         header.compression = syncthing_proto::MessageCompression::NONE.into();
@@ -179,20 +180,40 @@ impl Session {
     // FIXME(wfraser) only for testing
     pub fn read_to_end(&mut self, data: &mut Vec<u8>) -> Result<usize> {
         use std::io::Read;
-        self.tls.read_to_end(data).map_err(|e| e.into())
+        use std::mem::transmute;
+
+        let mut nread = 0;
+        loop {
+            if data.len() == data.capacity() {
+                data.reserve(32);
+            }
+
+            match self.tls.reader().read(unsafe { transmute(data.spare_capacity_mut()) }) {
+                Ok(n) => {
+                    unsafe { data.set_len(data.len() + n); }
+                    nread += n;
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    // No more plaintext available.
+                    break;
+                }
+                Err(e) => {
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(nread)
     }
 
     // FIXME(wfraser) only for testing
     pub fn write(&mut self, data: &[u8]) -> Result<usize> {
         use std::io::Write;
-        self.tls.write(data).map_err(|e| e.into())
+        self.tls.writer().write(data).map_err(|e| e.into())
     }
 
     // This is basically rustls::ClientSession::complete_io() with extra logging.
     // FIXME(wfraser) only public for testing
     pub fn complete_io(&mut self) -> Result<(usize, usize)> {
-        use rustls::Session;
-
         let handshaking = self.tls.is_handshaking();
         let mut eof = false;
         let mut wrlen = 0;
@@ -294,13 +315,12 @@ impl SessionBuilder {
         };
         info!("our device name is {:?}", device_name);
 
-        let mut config = rustls::ClientConfig::new();
-        config.set_single_client_cert(vec![self.client_cert], self.private_key);
-        config.alpn_protocols.push("bep/1.0".to_owned());
-
-        rustls::DangerousClientConfig { cfg: &mut config }
-            .set_certificate_verifier(
-                Arc::new(SyncthingCertVerifier::new(self.remote_device_id)));
+        let mut config = rustls::ClientConfig::builder()
+            .with_safe_defaults()
+            .with_custom_certificate_verifier(
+                Arc::new(SyncthingCertVerifier::new(self.remote_device_id)))
+            .with_single_cert(vec![self.client_cert], self.private_key)?;
+        config.alpn_protocols.push(b"bep/1.0".to_vec());
 
         let host_and_port = &self.remote_host_and_port;
         let stream = TcpStream::connect(host_and_port).map_err(|e| {
@@ -308,10 +328,10 @@ impl SessionBuilder {
             e
         })?;
 
-        let dnsname = webpki::DNSNameRef::try_from_ascii_str("syncthing").unwrap();
+        let dnsname = rustls::ServerName::try_from("syncthing")?;
 
         Ok(Session {
-            tls: rustls::ClientSession::new(&Arc::new(config), dnsname),
+            tls: rustls::ClientConnection::new(Arc::new(config), dnsname)?,
             stream,
             device_name,
             next_request_id: 0,
@@ -331,33 +351,31 @@ impl SyncthingCertVerifier {
     }
 }
 
-impl rustls::ServerCertVerifier for SyncthingCertVerifier {
+impl rustls::client::ServerCertVerifier for SyncthingCertVerifier {
     fn verify_server_cert(
         &self,
-        _roots: &rustls::RootCertStore,
-        presented_certs: &[rustls::Certificate],
-        _dns_name: webpki::DNSNameRef,
-        _ocsp_response: &[u8])
-        -> ::std::result::Result<rustls::ServerCertVerified, rustls::TLSError>
+        end_entity: &rustls::Certificate,
+        _intermediates: &[rustls::Certificate],
+        _server_name: &rustls::ServerName,
+        _scts: &mut dyn Iterator<Item = &[u8]>,
+        _ocsp_response: &[u8],
+        _now: std::time::SystemTime,
+    ) -> ::std::result::Result<rustls::client::ServerCertVerified, rustls::Error>
     {
         use rustls::internal::msgs::codec::Codec;
-        debug!("Checking device ID. Server presented {} certificates", presented_certs.len());
-        for (i, cert) in presented_certs.iter().enumerate() {
-            let cert_bytes = cert.get_encoding();
-            let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
-            hash_ctx.update(&cert_bytes[3..]);
-            let digest = hash_ctx.finish();
-            debug!("{}: cert hash is {:?}", i, digest);
-            let device_id = util::device_id_from_hash(digest.as_ref());
-            debug!("{}: device ID {}", i, device_id);
-            if device_id == self.device_id {
-                debug!("{}: matches", i);
-                return Ok(rustls::ServerCertVerified::assertion());
-            } else {
-                warn!("{}: mismatch", i);
-            }
+        debug!("Checking device ID");
+        let cert_bytes = end_entity.get_encoding();
+        let mut hash_ctx = ring::digest::Context::new(&ring::digest::SHA256);
+        hash_ctx.update(&cert_bytes[3..]);
+        let digest = hash_ctx.finish();
+        debug!("cert hash is {:?}", digest);
+        let device_id = util::device_id_from_hash(digest.as_ref());
+        debug!("device ID {}", device_id);
+        if device_id == self.device_id {
+            debug!("device ID matches");
+            return Ok(rustls::client::ServerCertVerified::assertion());
         }
         error!("none of the presented server certificates have the expected Device ID");
-        Err(rustls::TLSError::General("Syncthing device ID mismatch".to_owned()))
+        Err(rustls::Error::General("Syncthing device ID mismatch".to_owned()))
     }
 }

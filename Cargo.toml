@@ -15,11 +15,11 @@ libc = "0.2"
 log = "0.4"
 lz4-compression = "0.6"
 protobuf = "3"
-ring = "0.13.0-alpha"
-webpki = "0.18.0-alpha"
+ring = "0.16"
+rustls-pemfile = "1"
 
 [dependencies.rustls]
-version = "0.12"
+version = "0.20"
 # This feature is needed because we implement our own certificate validation instead of relying on
 # any certificate root or web PKI:
 features = ["dangerous_configuration"]

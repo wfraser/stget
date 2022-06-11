@@ -6,20 +6,18 @@ use anyhow::{bail, Context, Result};
 use std::io::{BufReader, Read};
 use std::fs::File;
 use std::path::Path;
-use rustls::internal::pemfile;
+use rustls_pemfile as pemfile;
 
 pub fn read_cert_file_pem(path: &Path) -> Result<Certificate> {
     let file = File::open(path)
         .with_context(|| format!("failed to open certificate file {:?}", path))?;
     let mut r = BufReader::new(file);
-    let mut certs = match pemfile::certs(&mut r) {
-        Ok(certs) => certs,
-        Err(()) => bail!(format!("failed to read certificate {:?} for some reason", path)),
-    };
+    let mut certs = pemfile::certs(&mut r)
+        .with_context(|| format!("failed to read certificate {path:?}"))?;
     if certs.len() != 1 {
         bail!("expected 1 certificate in {:?}; got {}", path, certs.len());
     }
-    Ok(certs.swap_remove(0))
+    Ok(Certificate(certs.swap_remove(0)))
 }
 
 pub fn read_cert_file_der(path: &Path) -> Result<Certificate> {
@@ -35,14 +33,12 @@ pub fn read_key_file_pem(path: &Path) -> Result<PrivateKey> {
     let file = File::open(path)
         .with_context(|| format!("failed to open private key file {:?}", path))?;
     let mut r = BufReader::new(file);
-    let mut keys = match pemfile::pkcs8_private_keys(&mut r) {
-        Ok(keys) => keys,
-        Err(()) => bail!(format!("failed to read private key {:?} for some reason", path)),
-    };
+    let mut keys = pemfile::pkcs8_private_keys(&mut r)
+        .with_context(|| format!("failed to read private key {path:?}"))?;
     if keys.len() != 1 {
         bail!("expected 1 private key in {:?}; got {}", path, keys.len());
     }
-    Ok(keys.swap_remove(0))
+    Ok(PrivateKey(keys.swap_remove(0)))
 }
 
 pub fn read_key_file_der(path: &Path) -> Result<PrivateKey> {
