@@ -26,32 +26,32 @@ error_chain! {
 fn main() {
     env_logger::init();
 
-    let args = clap::App::new(env!("CARGO_PKG_NAME"))
+    let args = clap::Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
         .author(env!("CARGO_PKG_AUTHORS"))
         .about("experimental Syncthing file retrieval program")
-        .arg(clap::Arg::with_name("address")
+        .arg(clap::Arg::new("address")
                 .help("Address of the remote host. Port 22000 is used if unspecified.")
                 .required(true)
                 .index(1))
-        .arg(clap::Arg::with_name("device_id")
+        .arg(clap::Arg::new("device_id")
                 .help("Device ID of the remote host.")
                 .required(true)
                 .index(2))
-        .arg(clap::Arg::with_name("path")
+        .arg(clap::Arg::new("path")
                 .help("File path to fetch.")
                 .index(3))
-        .arg(clap::Arg::with_name("list")
-                .short("l")
+        .arg(clap::Arg::new("list")
+                .short('l')
                 .long("list")
                 .takes_value(false)
                 .help("List all files on the remote end."))
-        .arg(clap::Arg::with_name("destination")
-                .short("d")
+        .arg(clap::Arg::new("destination")
+                .short('d')
                 .long("dest")
                 .takes_value(true)
                 .help("destination path for downloaded file(s)"))
-        .group(clap::ArgGroup::with_name("path_or_list")
+        .group(clap::ArgGroup::new("path_or_list")
                 .args(&["path", "list"])
                 .required(true))
         .get_matches();
@@ -162,8 +162,7 @@ fn main() {
             eprintln!("Remote declined to talk with us.");
             let (_len, remote_hello): (usize, proto::Hello) =
                 stget::session::Session::read_hello(&data).unwrap_or_else(|e| {
-                    eprintln!("error reading remote hello: {}", e);
-                    panic!(e);
+                    panic!("error reading remote hello: {}", e);
                 });
             eprintln!("Remote is \"{}\", running {} {}",
                       remote_hello.device_name,
@@ -253,8 +252,7 @@ impl<'a> ProgramState {
     pub fn handle_hello(&self, data: &mut Vec<u8>) -> State {
         let (len, remote_hello): (usize, proto::Hello) =
             stget::session::Session::read_hello(data).unwrap_or_else(|e| {
-                eprintln!("error reading remote hello: {}", e);
-                panic!(e);
+                panic!("error reading remote hello: {}", e);
             });
         eprintln!("Remote is \"{}\", running {} {}",
                 remote_hello.device_name,
@@ -272,8 +270,7 @@ impl<'a> ProgramState {
     ) -> State {
         let (len, msgtype, message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
-                eprintln!("Error reading remote cluster config: {}", e);
-                panic!(e);
+                panic!("Error reading remote cluster config: {}", e);
             });
         data.drain(0..len);
 
@@ -352,8 +349,7 @@ impl<'a> ProgramState {
                 &cluster_config,
                 proto::MessageType::CLUSTER_CONFIG)
             .unwrap_or_else(|e| {
-                eprintln!("error sending our cluster config: {}", e);
-                panic!(e);
+                panic!("error sending our cluster config: {}", e);
             });
 
         eprintln!("receiving folder index");
@@ -383,8 +379,7 @@ impl<'a> ProgramState {
 
         let (input_pos, msgtype, mut message) = stget::session::Session::read_message(data)
             .unwrap_or_else(|e| {
-                eprintln!("Error reading remote message: {}", e);
-                panic!(e);
+                panic!("Error reading remote message: {}", e);
             });
         debug!("{} bytes read", input_pos);
         assert_eq!(data_len, input_pos);
@@ -538,8 +533,7 @@ impl<'a> ProgramState {
                         all_blocks[0].size,
                         all_blocks[0].hash.clone()
                     ).unwrap_or_else(|e| {
-                        eprintln!("Error sending block request: {}", e);
-                        panic!(e);
+                        panic!("Error sending block request: {}", e);
                     });
 
                     let block_state = FileFetchState {
@@ -631,8 +625,7 @@ impl<'a> ProgramState {
             fetch_state.all_blocks[idx].size,
             fetch_state.all_blocks[idx].hash.clone()
         ).unwrap_or_else(|e| {
-            eprintln!("Error sending block request: {}", e);
-            panic!(e);
+            panic!("Error sending block request: {}", e);
         });
 
         Some((req_id, fetch_state))
