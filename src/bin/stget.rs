@@ -27,19 +27,18 @@ fn main() {
         .arg(clap::Arg::new("list")
                 .short('l')
                 .long("list")
-                .takes_value(false)
+                .action(clap::ArgAction::SetTrue)
                 .help("List all files on the remote end."))
         .arg(clap::Arg::new("destination")
                 .short('d')
                 .long("dest")
-                .takes_value(true)
                 .help("destination path for downloaded file(s)"))
         .group(clap::ArgGroup::new("path_or_list")
-                .args(&["path", "list"])
+                .args(["path", "list"])
                 .required(true))
         .get_matches();
 
-    let host_and_port = match args.value_of("address").unwrap() {
+    let host_and_port = match args.get_one::<String>("address").unwrap() {
         host if host.contains(':') => host.to_owned(),
         host => {
             debug!("no port specified; assuming 22000");
@@ -47,7 +46,7 @@ fn main() {
         }
     };
 
-    let device_id = args.value_of("device_id").unwrap();
+    let device_id = args.get_one::<String>("device_id").unwrap();
     if device_id.len() != 63 {
         eprintln!("Device ID should be 63 characters long, not {}", device_id.len());
         std::process::exit(1);
@@ -94,16 +93,16 @@ fn main() {
     let mut program_state = ProgramState {
         remote_cert_hash,
         folders_by_id: HashMap::new(),
-        mode: if args.is_present("list") {
+        mode: if args.get_flag("list") {
             Mode::List
         } else {
-            let path = args.value_of("path").unwrap().to_owned();
+            let path = args.get_one::<String>("path").unwrap().to_owned();
             if !path.contains('/') {
                 panic!("To fetch an entire folder, append a '/' to the path.");
             }
             Mode::Fetch(path)
         },
-        destination: args.value_of("destination").unwrap_or(".").to_owned(),
+        destination: args.get_one::<String>("destination").map(|s| s.as_str()).unwrap_or(".").to_owned(),
         protocol_state: Some(State::ExpectHello),
     };
 
@@ -351,8 +350,8 @@ impl ProgramState {
     ) -> State {
         let header_len = NetworkEndian::read_u16(&data[0..2]) as usize;
         let body_len = NetworkEndian::read_u32(&data[
-            2 + header_len as usize
-                .. 2 + header_len as usize + 4]) as usize;
+            2 + header_len
+                .. 2 + header_len + 4]) as usize;
         let data_len = 2 + header_len + 4 + body_len;
         if data.len() < data_len {
             debug!("not enough data; reading more (need {}, have {})",
